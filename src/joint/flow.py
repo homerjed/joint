@@ -8,6 +8,8 @@ import equinox as eqx
 import diffrax as dfx
 from jaxtyping import Float, Array, PRNGKeyArray
 
+from .utils import ModalityInfos
+
 
 def clip_time(t, eps=1e-6):
     t = jnp.clip(t, eps, 1. - eps)
@@ -114,11 +116,6 @@ def single_sample_fn_ode(
         saveat=saveat
     )
 
-    # if times is not None:
-    #     x_1 = sol.ys
-    # else:
-    #     (x_1,) = sol.ys
-
     x_1 = sol.ys
 
     # Magical strange axis appearing...
@@ -128,20 +125,41 @@ def single_sample_fn_ode(
 
 
 @eqx.filter_jit
-def single_sample_fn_ode_(v, x_0, modalities_to_sample=None, times=None):
+def single_sample_modalities_fn_ode(
+    v: eqx.Module, 
+    x_0: dict[str, Float[Array, "..."]], 
+    modality_infos: ModalityInfos,
+    modalities_to_sample: Optional[list[str]] = None, 
+    *,
+    solution_kwargs: SolutionKwargs, 
+    times: Optional[Float[Array, "T"]] = None
+) -> dict[str, Float[Array, "..."]]:
 
-    # Gather masks for modalities that should not be sampled
     if modalities_to_sample is not None:
-        masks = []
-        for name in modalities_to_sample:
-            if name not in x_0.keys():
-                masks.append(jnp.zeros_like(x_0[name]))
+        modalities_to_sample = frozenset(modalities_to_sample)
+
+    # Optional attention mask for restricting which modality tokens can be attended to.
+    masks = None
+    if modalities_to_sample is not None:
+        masks = {}
+        for name in x_0.keys():
+            seq_len = modality_infos[name].sequence_length
+            if name not in modalities_to_sample:
+                masks[name] = jnp.zeros((seq_len,), dtype=jnp.bool_)
             else:
-                masks.append(jnp.ones_like(x_0[name]))
+                masks[name] = jnp.ones((seq_len,), dtype=jnp.bool_)
 
     def velocity(t, x, args):
-        (v,) = args
-        return v(x, t=t)
+        (v, masks) = args # Same mask across time
+        u = v(x, t=t, masks=masks)
+        if modalities_to_sample is None:
+            return u
+        # Set velocities of inputs that are NOT being sampled to zero
+        u = {
+            name: (u[name] if name in modalities_to_sample else jnp.zeros_like(u[name]))
+            for name in x.keys()
+        }
+        return u
     
     v = eqx.tree_inference(v, True)
 
@@ -150,20 +168,15 @@ def single_sample_fn_ode_(v, x_0, modalities_to_sample=None, times=None):
     term = dfx.ODETerm(velocity) 
     sol = dfx.diffeqsolve(
         term, 
-        solver, 
-        t0, 
-        t1, 
-        dt0, 
+        solution_kwargs.solver, 
+        solution_kwargs.t0, 
+        solution_kwargs.t1, 
+        solution_kwargs.dt0, 
         x_0, 
-        args=(v,),
+        args=(v, masks),
         saveat=saveat
     )
-
-    # if times is not None:
-    #     x_1 = sol.ys
-    # else:
-    #     (x_1,) = sol.ys
-
+    
     x_1 = sol.ys
 
     # Magical strange axis appearing...

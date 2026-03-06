@@ -22,7 +22,7 @@ class AdaLayerNorm(eqx.Module):
         embed_dim: int, 
         *, 
         key: PRNGKeyArray, 
-        eps=1e-5
+        eps: float = 1e-5
     ):
         keys = jr.split(key)
 
@@ -105,7 +105,7 @@ class AttentionBlock(eqx.Module):
         self,
         x: Float[Array, "s e"],
         c: Optional[Float[Array, "e"]] = None,
-        mask: Optional[Float[Array, "s e"]] = None,
+        mask: Optional[Bool[Array, "s s"]] = None,
         key: Optional[PRNGKeyArray] = None,
     ) -> Float[Array, "s e"]:
 
@@ -161,7 +161,7 @@ class VisionTransformer(eqx.Module):
         self,
         x: Float[Array, "s e"],
         c: Optional[Float[Array, "e"]],
-        mask: Optional[Float[Array, "s e"]] = None,
+        mask: Optional[Bool[Array, "s s"]] = None,
         *,
         key: Optional[PRNGKeyArray] = None,
         use_class_token: bool = False # May want to return class token for downstream regression
@@ -169,6 +169,8 @@ class VisionTransformer(eqx.Module):
 
         if use_class_token:
             x = jnp.concatenate([self.cls_token, x])
+            if mask is not None:
+                mask = jnp.pad(mask, ((1, 0), (1, 0)), constant_values=True)
 
         if key is not None:
             dropout_key, *attention_keys = jr.split(key, num=len(self.attention_blocks) + 1)
@@ -190,8 +192,11 @@ class VisionTransformer(eqx.Module):
 class FlowTransformer(eqx.Module):
     modalities_encoder: ModalitiesEncoder
     modalities_decoder: ModalitiesDecoder
+
     transformer: VisionTransformer
-    time_embedder: eqx.Module | Callable
+
+    time_embedder: eqx.Module | Callable[[Scalar], Float[Array, "e"]]
+
     modality_infos: dict[str, ModalitySpec]
 
     def __init__(
@@ -224,7 +229,7 @@ class FlowTransformer(eqx.Module):
         d: Modalities, 
         t: Optional[Scalar] = None, 
         # condition: Optional[Float[Array, "..."]] = None, # Optional input: must be embedding dim?
-        mask: Optional[Bool[Array, "..."]] = None,
+        masks: Optional[dict[str, Bool[Array, "..."]]] = None,
         key: Optional[PRNGKeyArray] = None,
         *,
         use_class_token: bool = False
@@ -232,7 +237,19 @@ class FlowTransformer(eqx.Module):
 
         keys = sorted(d.keys())
 
-        d = {k: d[k] for k in keys} # normalize modality order once
+        d = {k: d[k] for k in keys} # Normalize modality order once
+
+        if masks is not None:
+            masks = {k: masks[k] for k in keys}
+            token_mask = jnp.concatenate([jnp.ravel(masks[k]) for k in keys], axis=0)
+            token_mask = token_mask.astype(jnp.bool_)
+            # Equinox expects mask shape (query_seq_length, kv_seq_length).
+            mask = jnp.broadcast_to(
+                token_mask[jnp.newaxis, :],
+                (token_mask.shape[0], token_mask.shape[0]),
+            )
+        else:
+            mask = None
 
         # Embed time as a condition into attention / MLP / LayerNorms
         # not as a token!
@@ -256,12 +273,3 @@ class FlowTransformer(eqx.Module):
         v = self.modalities_decoder(h)
 
         return v
-
-
-        # v = jax.vmap(self.transformer.mlp)(h) # NOTE: not necessary?
-        # Get sizes to split v into each modality
-        # dims = jax.tree.map(lambda s: s[0], shapes, is_leaf=lambda l: isinstance(l, tuple))
-        # lengths = jnp.cumsum(jnp.array(jax.tree.leaves(dims)))[:-1]
-        # v = jnp.split(v, lengths) # Should accumulate dims?
-        # v = 
-        # v = jax.tree.unflatten(jax.tree.structure(d), v)

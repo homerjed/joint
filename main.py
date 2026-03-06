@@ -13,7 +13,7 @@ from einops import rearrange
 from joint.config import get_config
 from joint.modules import ModalitiesEncoder, ModalitiesDecoder
 from joint.transformer import VisionTransformer, FlowTransformer
-from joint.flow import SolutionKwargs, get_time_embedder, single_sample_fn_ode
+from joint.flow import SolutionKwargs, get_time_embedder, single_sample_fn_ode, single_sample_modalities_fn_ode
 from joint.utils import ModalitySpec, ModalityInfos, grf2d_powerlaw, modality_dataloader
 from joint.train import make_step, evaluate_validation_set, save_training_state, load_training_state
 
@@ -85,7 +85,9 @@ if __name__ == "__main__":
     keys = jr.split(key, len(A))
     X = jax.vmap(generator)(keys, A, B)
     X = X[:, jnp.newaxis, :, :]
-    X = (X - jnp.mean(X, axis=0)) / jnp.std(X, axis=0)
+    X_mean = jnp.mean(X, axis=0)
+    X_std = jnp.std(X, axis=0)
+    X = (X - X_mean) / X_std
 
     Y = jnp.stack([A, B], axis=1)
     n_samples = len(X)
@@ -103,6 +105,13 @@ if __name__ == "__main__":
 
     X_train, Y_train = X[train_idx], Y[train_idx]
     X_val, Y_val = X[val_idx], Y[val_idx]
+
+    # Fixed conditioning target for conditional sampling diagnostics.
+    key, key_ref_idx = jr.split(key)
+    ref_idx = int(jr.randint(key_ref_idx, shape=(), minval=0, maxval=len(X_train)))
+    x_ref_train = X_train[ref_idx]
+    a_ref = Y_train[ref_idx, 0]
+    b_ref = Y_train[ref_idx, 1]
 
     n_batch_train = max(1, int(config.train_config.n_batch))
     n_batch_val = max(1, int(getattr(config.train_config, "n_batch_val", n_batch_train)))
@@ -269,7 +278,10 @@ if __name__ == "__main__":
                 steps.set_postfix(L=float(loss), L_val=last_val_loss)
 
             if step % sample_every == 0:
-                samples_dict = jax.vmap(lambda z: single_sample_fn_ode(v, z, solution_kwargs))(Z)
+
+                # Sample modalities 
+                sample_fn = lambda z: single_sample_fn_ode(v, z, solution_kwargs)
+                samples_dict = jax.vmap(sample_fn)(Z)
                 generated_samples = rearrange(
                     samples_dict["x"], 
                     "(p q) c h w -> (p h) (q w) c", 
@@ -295,6 +307,41 @@ if __name__ == "__main__":
                 fig.savefig(samples_dir / f"samples_{step:07d}.png")
                 plt.close(fig)
 
+                # Sample modalities with fixed parameters
+                Z_ = {
+                    name: jr.normal(jr.fold_in(key, i), (sample_n_samples ** 2, *spec.input_shape))
+                    for i, (name, spec) in enumerate(modality_infos.items())
+                }
+                Z_["a"] = jnp.full((sample_n_samples ** 2, 1), a_ref)
+                Z_["b"] = jnp.full((sample_n_samples ** 2, 1), b_ref)
+
+                sample_fn = lambda z: single_sample_modalities_fn_ode(
+                    v, 
+                    z, 
+                    modality_infos=modality_infos, 
+                    modalities_to_sample=["x"], 
+                    solution_kwargs=solution_kwargs
+                )
+                samples_dict = jax.vmap(sample_fn)(Z_)
+                generated_samples = rearrange(
+                    samples_dict["x"], 
+                    "(p q) c h w -> (p h) (q w) c", 
+                    p=sample_n_samples
+                )
+
+                fig, axs = plt.subplots(1, 2, figsize=(8, 4))
+                ax = axs[0]
+                ax.imshow(generated_samples, cmap="coolwarm", vmin=X_train.min(), vmax=X_train.max())
+                ax = axs[1]
+                ax.imshow(jnp.transpose(x_ref_train, (1, 2, 0)), cmap="coolwarm", vmin=X_train.min(), vmax=X_train.max())
+                for ax in axs:
+                    ax.set_xticks([])
+                    ax.set_yticks([])
+                fig.tight_layout()
+                fig.savefig(samples_dir / f"samples_fixed_ab_{step:07d}.png")
+                plt.close(fig)
+
+                # Losses
                 plt.figure()
                 plt.semilogy(train_steps, train_losses, label="train")
                 if val_losses:
@@ -306,6 +353,7 @@ if __name__ == "__main__":
                 plt.savefig(out_dir / "loss.png")
                 plt.close()
 
+                # Save train state
                 save_training_state(
                     train_state_path,
                     v, 
