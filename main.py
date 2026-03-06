@@ -27,10 +27,17 @@ if __name__ == "__main__":
     # TODO: raw python dataloader that returns dicts of modalities, so that train step takes a dict of modalities as input instead of X, Y and n_batch
     # TODO: split multidimensional vector modalities into single "scalars" 
     # TODO: wrap DiT in continuous flow (probably not necessary for PPD)
+ 
+    out_dir = Path("out/")
+    samples_dir = out_dir / "samples/"
+    if not out_dir.exists():
+        out_dir.mkdir()
+        samples_dir.mkdir()
 
-    config = get_config()
+    config_path = out_dir / "config.json"
+    train_state_path = out_dir / "train_state.eqx"
 
-    train_state_path = Path("train_state.eqx")
+    config = get_config(config_path)
 
     image_shape = (config.data_config.n_channels, config.data_config.n_pix, config.data_config.n_pix)
     parameter_shape = tuple(config.data_config.parameter_shape)
@@ -144,7 +151,11 @@ if __name__ == "__main__":
         )
 
     L = []
-    with trange(start_step, config.train_config.n_steps, colour="green") as steps:
+    with trange(
+        start_step, 
+        config.train_config.n_steps, 
+        colour="green"
+    ) as steps:
         for step in steps:
             key, key_step = jr.split(key)
 
@@ -188,12 +199,12 @@ if __name__ == "__main__":
                     ax.set_xticks([])
                     ax.set_yticks([])
                 fig.tight_layout()
-                fig.savefig(f"samples/samples_{step:07d}.png")
+                fig.savefig(samples_dir / f"samples_{step:07d}.png")
                 plt.close(fig)
 
                 plt.figure()
                 plt.loglog(L)
-                plt.savefig("loss.png")
+                plt.savefig(out_dir / "loss.png")
                 plt.close()
 
                 save_training_state(

@@ -110,9 +110,7 @@ def load_json_config(path):
     return _to_config_node(_normalize_config_schema(decoded))
 
 
-def get_config(config_path: Optional[Path | str] = None):
-    if config_path is None:
-        config_path = Path("config.json")
+def get_config(config_path: Path | str):
 
     default_config = _to_config_node({
         "data_config": {
