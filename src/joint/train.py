@@ -90,26 +90,20 @@ def make_step(
     v: eqx.Module, 
     path: OptimalTransportPath, 
     key: PRNGKeyArray, 
-    X: Float[Array, "n _ _ _"], # NOTE: this step function is setup for only two modalities
-    Y: Float[Array, "n _"] | Int[Array, "n _"], 
+    d: dict[str, Float[Array, "n ..."] | Int[Array, "n ..."]],
     opt_state: optax.OptState, 
     opt: optax.GradientTransformation, 
-    n_batch: int, 
     v_ema: Optional[eqx.Module] = None, 
     *, 
     solution_kwargs: SolutionKwargs
 ) -> tuple[eqx.Module, Scalar, optax.OptState, eqx.Module]:
-    key_idx, key_t, key_step = jr.split(key, 3)
+    n_batch = len(next(iter(d.values())))
+    key_t, key_z, key_step = jr.split(key, 3)
 
     keys = jr.split(key_step, n_batch)
 
-    idx_x, idx_z = jr.choice(key_idx, len(X), (2, n_batch))
-    x, y = X[idx_x], Y[idx_x]
     t = get_time(key_t, n_batch, t0=solution_kwargs.t0, t1=solution_kwargs.t1)
-
-    d = dict(x=x, y=y) # Setup modality dictionary (NOTE: maybe one entry per model parameter?)
-
-    z = tree_random_normal_like(d, key)
+    z = tree_random_normal_like(d, key_z)
 
     grad_fn = eqx.filter_value_and_grad(loss_fn)
     loss, grads = grad_fn(v, path, d, z, t, keys)
@@ -121,3 +115,50 @@ def make_step(
         v_ema = apply_ema(v_ema, v)
 
     return v, loss, opt_state, v_ema
+
+
+@eqx.filter_jit
+def evaluate(
+    v: eqx.Module,
+    path: OptimalTransportPath,
+    key: PRNGKeyArray,
+    d: dict[str, Float[Array, "n ..."] | Int[Array, "n ..."]],
+    *,
+    solution_kwargs: SolutionKwargs
+) -> Scalar:
+    n_batch = len(next(iter(d.values())))
+    key_t, key_z, key_step = jr.split(key, 3)
+
+    v = eqx.nn.inference_mode(v)
+
+    keys = jr.split(key_step, n_batch)
+    t = get_time(key_t, n_batch, t0=solution_kwargs.t0, t1=solution_kwargs.t1)
+    z = tree_random_normal_like(d, key_z)
+
+    loss = loss_fn(v, path, d, z, t, keys)
+
+    return loss
+
+
+def evaluate_validation_set(
+    model,
+    path,
+    val_loader,
+    n_val_batches: int,
+    *,
+    key,
+    solution_kwargs: SolutionKwargs,
+):
+    losses = []
+    for _ in range(n_val_batches):
+        key, key_eval = jr.split(key)
+        losses.append(
+            evaluate(
+                model,
+                path,
+                key_eval,
+                next(val_loader),
+                solution_kwargs=solution_kwargs,
+            )
+        )
+    return jnp.mean(jnp.stack(losses))

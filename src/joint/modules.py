@@ -8,7 +8,7 @@ import equinox as eqx
 from jaxtyping import Array, Float, PRNGKeyArray
 from einops import rearrange
 
-from .utils import ModalitySpec
+from .utils import ModalityInfos, ModalitySpec
 
 
 class PatchEmbedding(eqx.Module):
@@ -174,7 +174,7 @@ class ModalitiesEncoder(eqx.Module):
 
     def __init__(
         self, 
-        modality_infos: dict[str, ModalitySpec], 
+        modality_infos: ModalityInfos, 
         *, 
         key: PRNGKeyArray
     ):
@@ -208,7 +208,7 @@ class ModalitiesDecoder(eqx.Module):
 
     def __init__(
         self, 
-        modality_infos: dict[str, ModalitySpec], 
+        modality_infos: ModalityInfos, 
         *, 
         key: PRNGKeyArray
     ):

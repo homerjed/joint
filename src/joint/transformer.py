@@ -157,8 +157,6 @@ class VisionTransformer(eqx.Module):
 
         self.dropout = eqx.nn.Dropout(dropout_rate)
 
-        # No MLP now but maybe output layernorm?
-
     def __call__(
         self,
         x: Float[Array, "s e"],

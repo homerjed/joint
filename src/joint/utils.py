@@ -1,10 +1,137 @@
+from typing import Iterator
+from collections.abc import MutableMapping
 from functools import partial
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Tuple, Literal, Optional
 import jax
 import jax.numpy as jnp
 import jax.random as jr
 import equinox as eqx
+
+
+@partial(
+    jax.tree_util.register_dataclass,
+    data_fields=["data"],
+    meta_fields=[],
+)
+@dataclass
+class ModalityInfos(MutableMapping[str, "ModalitySpec"]):
+    """Dataclass-backed mapping with attribute access and runtime type checks."""
+
+    data: dict[str, "ModalitySpec"] = field(default_factory=dict)
+
+    def __post_init__(self):
+        if not hasattr(self.data, "items"):
+            raise TypeError(
+                f"data must be a mapping of modality names to ModalitySpec, got {type(self.data)!r}."
+            )
+        self.data = dict(self.data)
+        self._validate(self.data)
+
+    def __getattr__(self, name):
+        try:
+            data = object.__getattribute__(self, "data")
+        except KeyError as err:
+            raise AttributeError(name) from err
+        except AttributeError as err:
+            raise AttributeError(name) from err
+        try:
+            return data[name]
+        except KeyError as err:
+            raise AttributeError(name) from err
+
+    def __getitem__(self, key):
+        return self.data[key]
+
+    def __setitem__(self, key, value):
+        self._validate_entry(key, value)
+        candidate = dict(self.data)
+        candidate[key] = value
+        self._validate(candidate)
+        self.data = candidate
+
+    def __delitem__(self, key):
+        candidate = dict(self.data)
+        del candidate[key]
+        self._validate(candidate)
+        self.data = candidate
+
+    def __iter__(self):
+        return iter(self.data)
+
+    def __len__(self):
+        return len(self.data)
+
+    def keys(self):
+        return self.data.keys()
+
+    def items(self):
+        return self.data.items()
+
+    def values(self):
+        return self.data.values()
+
+    def get(self, key, default=None):
+        return self.data.get(key, default)
+
+    @staticmethod
+    def _validate_entry(key, value):
+        if not isinstance(key, str):
+            raise TypeError(f"Modality key must be a string, got {type(key)!r}.")
+        if not isinstance(value, ModalitySpec):
+            raise TypeError(
+                "Modality value must be a ModalitySpec, "
+                f"got {type(value)!r} for key '{key}'."
+            )
+
+    @staticmethod
+    def _validate(data):
+        seen_names = set()
+        seen_spec_ids = set()
+        for name, spec in data.items():
+            ModalityInfos._validate_entry(name, spec)
+            if spec.name != name:
+                raise ValueError(
+                    f"ModalitySpec.name mismatch for key '{name}': got '{spec.name}'."
+                )
+            if spec.name in seen_names:
+                raise ValueError(f"Duplicate modality name '{spec.name}' found in modality infos.")
+            seen_names.add(spec.name)
+
+            spec_id = id(spec)
+            if spec_id in seen_spec_ids:
+                raise ValueError(
+                    f"Duplicate ModalitySpec object reused for key '{name}'. "
+                    "Each key must have its own ModalitySpec instance."
+                )
+            seen_spec_ids.add(spec_id)
+
+
+def modality_dataloader(
+    modalities: dict[str, jax.Array],
+    n_batch: int,
+    *,
+    key: jax.Array,
+    shuffle: bool = True,
+) -> Iterator[dict[str, jax.Array]]:
+    names = tuple(modalities.keys())
+    arrays = tuple(modalities[name] for name in names)
+    n_samples = len(arrays[0])
+    idx_all = jnp.arange(n_samples)
+    if any(len(array) != n_samples for array in arrays[1:]):
+        raise ValueError("All modality arrays must have the same leading dimension.")
+    if n_batch > n_samples:
+        raise ValueError("n_batch must be <= number of samples.")
+
+    while True:
+        if shuffle:
+            key, key_perm = jr.split(key)
+            perm = jr.permutation(key_perm, n_samples)
+        else:
+            perm = idx_all
+        for start in range(0, n_samples - n_batch + 1, n_batch):
+            idx = perm[start : start + n_batch]
+            yield {name: array[idx] for name, array in zip(names, arrays)}
 
 
 def tree_random_normal_like(tree, key, dtype=None):
@@ -219,18 +346,3 @@ def gaussian_to_lognormal_positive(g: jnp.ndarray, axis=None, clip=None) -> jnp.
         g0 = jnp.clip(g0, -clip, clip)
 
     return jnp.exp(g0 - 0.5 * var)
-
-# key = jax.random.PRNGKey(0)
-# f = grf2d_powerlaw(key, n=128, L=1.0, A=1.0, B=-3.0, k0=2.0*jnp.pi)
-
-# plt.figure()
-# plt.imshow(f)
-# plt.xticks([])
-# plt.yticks([])
-# plt.show()
-
-# plt.figure()
-# plt.imshow(gaussian_to_lognormal_positive(f))
-# plt.xticks([])
-# plt.yticks([])
-# plt.show()

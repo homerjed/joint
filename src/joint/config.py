@@ -110,14 +110,16 @@ def load_json_config(path):
     return _to_config_node(_normalize_config_schema(decoded))
 
 
-def get_config(config_path: Path | str):
+def get_config(config_path: Path | str, *, reload: bool = True, seed: int = 0) -> ConfigNode:
 
-    default_config = _to_config_node({
+    default_config = {
+        "seed": seed,
         "data_config": {
             "n_samples": 10_000,
             "n_channels": 1,
-            "n_pix": 64,
+            "n_pix": 32,
             "parameter_shape": (2,),
+            "val_fraction": 0.1,
         },
         "model_config": {
             "t_emb_dim": 8,
@@ -132,10 +134,12 @@ def get_config(config_path: Path | str):
         "train_config": {
             "n_steps": 100_000,
             "n_batch": 256,
+            "n_batch_val": 256,
             "opt_factory": optax.adam,
             "opt_kwargs": {"learning_rate": 5e-4},
             "use_ema": True,
-            "sample_every": 1000,
+            "sample_every": 500,
+            "n_steps_validate": 100,
         },
         "sampling_config": {
             "n_samples": 4,
@@ -145,9 +149,11 @@ def get_config(config_path: Path | str):
             "solver_factory": dfx.Heun,
             "path_factory": OptimalTransportPath,
         },
-    })
+    }
 
-    if config_path.exists():
+    default_config = _to_config_node(default_config)
+
+    if reload and config_path.exists():
         config = load_json_config(config_path)
     else:
         config = default_config
