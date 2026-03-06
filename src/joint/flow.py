@@ -63,7 +63,7 @@ def get_timestep_embedding(
     timesteps: jax.typing.ArrayLike, 
     embedding_dim: int, 
     dtype=jnp.float32
-) -> jax.Array:
+) -> Float[Array, "e"]:
     # Convert scalar timesteps to an array
     if jnp.isscalar(timesteps):
         timesteps = jnp.array(timesteps, dtype=dtype)
