@@ -1,4 +1,5 @@
 import argparse
+import inspect
 import time
 from copy import deepcopy
 from pathlib import Path
@@ -14,7 +15,14 @@ from joint.config import get_config
 from joint.modules import ModalitiesEncoder, ModalitiesDecoder
 from joint.transformer import VisionTransformer, FlowTransformer
 from joint.flow import SolutionKwargs, get_time_embedder, single_sample_fn_ode, single_sample_modalities_fn_ode
-from joint.utils import ModalitySpec, ModalityInfos, grf2d_powerlaw, modality_dataloader
+from joint.utils import (
+    ModalitySpec,
+    ModalityInfos,
+    grf2d_powerlaw,
+    modality_dataloader,
+    count_parameters,
+    make_layernorm_decay_mask,
+)
 from joint.train import make_step, evaluate_validation_set, save_training_state, load_training_state
 
 
@@ -24,19 +32,22 @@ def get_args():
         "--run_name",
         type=str,
         default="0",
-        help="Run tag used as a subdirectory inside out/",
+        help="Run tag used as a subdirectory inside `out/`",
     )
     parser.add_argument(
         "--reload",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Reload config/train_state from out/<run_name>/ if present (use --no-reload for fresh run).",
+        help="Reload config/train_state from `out/<run_name>/` if present (use --no-reload for fresh run).",
     )
     args = parser.parse_args()
     return args
 
 
 if __name__ == "__main__":
+
+    # TODO: make sample fns a method of FlowTransformer, so whole framework can be agnostic to type of 
+    # generative model that is being used to train the transformer
  
     args = get_args()
 
@@ -59,7 +70,6 @@ if __name__ == "__main__":
     num_patches = (config.data_config.n_pix // config.model_config.patch_size) ** 2
 
     # Other
-    opt = config.train_config.opt_factory(**config.train_config.opt_kwargs)
     use_ema = config.train_config.use_ema
     sample_every = config.train_config.sample_every
     n_steps_validate = max(1, int(getattr(config.train_config, "n_steps_validate", sample_every)))
@@ -91,8 +101,6 @@ if __name__ == "__main__":
 
     Y = jnp.stack([A, B], axis=1)
     n_samples = len(X)
-    if n_samples < 2:
-        raise ValueError("Need at least 2 samples to create train/validation splits.")
     n_val = max(1, int(n_samples * val_fraction))
     n_val = min(n_val, n_samples - 1)
     n_train = n_samples - n_val
@@ -101,10 +109,10 @@ if __name__ == "__main__":
     key, key_split = jr.split(key)
     idx = jr.permutation(key_split, n_samples)
     train_idx = idx[:n_train]
-    val_idx = idx[n_train:]
+    valid_idx = idx[n_train:]
 
     X_train, Y_train = X[train_idx], Y[train_idx]
-    X_val, Y_val = X[val_idx], Y[val_idx]
+    X_valid, Y_valid = X[valid_idx], Y[valid_idx]
 
     # Fixed conditioning target for conditional sampling diagnostics.
     key, key_ref_idx = jr.split(key)
@@ -115,10 +123,10 @@ if __name__ == "__main__":
 
     n_batch_train = max(1, int(config.train_config.n_batch))
     n_batch_val = max(1, int(getattr(config.train_config, "n_batch_val", n_batch_train)))
-    n_batch_val = min(n_batch_val, len(X_val))
-    n_val_batches = max(1, len(X_val) // n_batch_val)
+    n_batch_val = min(n_batch_val, len(X_valid))
+    n_val_batches = max(1, len(X_valid) // n_batch_val)
 
-    key, key_train_loader, key_val_loader = jr.split(key, 3)
+    key, key_train_loader, key_valid_loader = jr.split(key, 3)
 
     train_loader = modality_dataloader(
         {
@@ -131,12 +139,12 @@ if __name__ == "__main__":
     )
     val_loader = modality_dataloader(
         {
-            "x": X_val, 
-            "a": Y_val[:, 0][:, jnp.newaxis], 
-            "b": Y_val[:, 1][:, jnp.newaxis]
+            "x": X_valid, 
+            "a": Y_valid[:, 0][:, jnp.newaxis], 
+            "b": Y_valid[:, 1][:, jnp.newaxis]
         },
         n_batch=n_batch_val,
-        key=key_val_loader,
+        key=key_valid_loader,
         shuffle=False,
     )
 
@@ -192,8 +200,8 @@ if __name__ == "__main__":
 
     solution_kwargs = SolutionKwargs(
         config.sampling_config.solver_factory(), 
-        config.sampling_config.t0, 
-        config.sampling_config.t1, 
+        config.sampling_config.t0,
+        config.sampling_config.t1,
         config.sampling_config.dt0
     )
 
@@ -207,7 +215,18 @@ if __name__ == "__main__":
         modality_infos=modality_infos
     )
 
+    print("Model has {:.3E} parameters.".format(count_parameters(v)))
+
     # Optimiser, EMA and fixed sampling noise
+    opt_kwargs = dict(config.train_config.opt_kwargs)
+    try:
+        factory_params = inspect.signature(config.train_config.opt_factory).parameters
+    except (TypeError, ValueError):
+        factory_params = {}
+    if "mask" in factory_params and "mask" not in opt_kwargs:
+        opt_kwargs["mask"] = make_layernorm_decay_mask(v)
+    opt = config.train_config.opt_factory(**opt_kwargs)
+
     opt_state = opt.init(eqx.filter(v, eqx.is_inexact_array))
 
     if use_ema:
@@ -307,45 +326,84 @@ if __name__ == "__main__":
                 fig.savefig(samples_dir / f"samples_{step:07d}.png")
                 plt.close(fig)
 
-                # Sample modalities with fixed parameters
-                Z_ = {
+                # Sample x with fixed parameters a,b.
+                Z_fixed_ab = {
                     name: jr.normal(jr.fold_in(key, i), (sample_n_samples ** 2, *spec.input_shape))
                     for i, (name, spec) in enumerate(modality_infos.items())
                 }
-                Z_["a"] = jnp.full((sample_n_samples ** 2, 1), a_ref)
-                Z_["b"] = jnp.full((sample_n_samples ** 2, 1), b_ref)
+                Z_fixed_ab["a"] = jnp.full((sample_n_samples ** 2, 1), a_ref)
+                Z_fixed_ab["b"] = jnp.full((sample_n_samples ** 2, 1), b_ref)
 
-                sample_fn = lambda z: single_sample_modalities_fn_ode(
+                sample_fn_fixed_ab = lambda z: single_sample_modalities_fn_ode(
                     v, 
                     z, 
                     modality_infos=modality_infos, 
                     modalities_to_sample=["x"], 
                     solution_kwargs=solution_kwargs
                 )
-                samples_dict = jax.vmap(sample_fn)(Z_)
-                generated_samples = rearrange(
-                    samples_dict["x"], 
+                samples_fixed_ab = jax.vmap(sample_fn_fixed_ab)(Z_fixed_ab)
+                generated_x_fixed_ab = rearrange(
+                    samples_fixed_ab["x"], 
                     "(p q) c h w -> (p h) (q w) c", 
                     p=sample_n_samples
                 )
 
-                fig, axs = plt.subplots(1, 2, figsize=(8, 4))
-                ax = axs[0]
-                ax.imshow(generated_samples, cmap="coolwarm", vmin=X_train.min(), vmax=X_train.max())
-                ax = axs[1]
+                # Sample a,b with fixed x ~ N(0, 1).
+                key, key_x_fixed = jr.split(key)
+                x_fixed = X_valid[:1] # jr.normal(key_x_fixed, (1, *modality_infos["x"].input_shape))
+                Z_fixed_x = {
+                    name: jr.normal(jr.fold_in(key, i + 100), (sample_n_samples ** 2, *spec.input_shape))
+                    for i, (name, spec) in enumerate(modality_infos.items())
+                }
+                Z_fixed_x["x"] = jnp.repeat(x_fixed, sample_n_samples ** 2, axis=0)
+
+                sample_fn_fixed_x = lambda z: single_sample_modalities_fn_ode(
+                    v,
+                    z,
+                    modality_infos=modality_infos,
+                    modalities_to_sample=["a", "b"],
+                    solution_kwargs=solution_kwargs
+                )
+                samples_fixed_x = jax.vmap(sample_fn_fixed_x)(Z_fixed_x)
+                generated_a_grid = rearrange(
+                    samples_fixed_x["a"],
+                    "(p q) 1 -> p q",
+                    p=sample_n_samples
+                )
+                generated_b_grid = rearrange(
+                    samples_fixed_x["b"],
+                    "(p q) 1 -> p q",
+                    p=sample_n_samples
+                )
+
+                fig, axs = plt.subplots(2, 2, figsize=(8, 8))
+                ax = axs[0, 0]
+                ax.imshow(generated_x_fixed_ab, cmap="coolwarm", vmin=X_train.min(), vmax=X_train.max())
+                ax.set_title(f"Generated x | fixed a,b=({float(a_ref):.2f},{float(b_ref):.2f})")
+                ax = axs[0, 1]
                 ax.imshow(jnp.transpose(x_ref_train, (1, 2, 0)), cmap="coolwarm", vmin=X_train.min(), vmax=X_train.max())
-                for ax in axs:
-                    ax.set_xticks([])
-                    ax.set_yticks([])
+                ax.set_title("Real train x (same a,b)")
+
+                ax = axs[1, 0]
+                ax.imshow(generated_a_grid, cmap="viridis", vmin=Y_train[:, 0].min(), vmax=Y_train[:, 0].max())
+                ax.set_title("Generated a | fixed x~N(0,1)")
+                ax = axs[1, 1]
+                ax.imshow(generated_b_grid, cmap="viridis", vmin=Y_train[:, 1].min(), vmax=Y_train[:, 1].max())
+                ax.set_title("Generated b | fixed x~N(0,1)")
+
+                for ax_row in axs:
+                    for ax in ax_row:
+                        ax.set_xticks([])
+                        ax.set_yticks([])
                 fig.tight_layout()
                 fig.savefig(samples_dir / f"samples_fixed_ab_{step:07d}.png")
                 plt.close(fig)
 
                 # Losses
                 plt.figure()
-                plt.semilogy(train_steps, train_losses, label="train")
+                plt.loglog(train_steps, train_losses, label="train")
                 if val_losses:
-                    plt.semilogy(val_steps, val_losses, label="valid")
+                    plt.loglog(val_steps, val_losses, label="valid")
                 plt.xlabel("step")
                 plt.ylabel("loss")
                 plt.legend()

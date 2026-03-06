@@ -7,6 +7,59 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import equinox as eqx
+from jaxtyping import PRNGKeyArray, Array
+
+
+def count_parameters(model):
+    return sum(jax.tree.leaves(jax.tree.map(jnp.size, eqx.filter(model, eqx.is_array))))
+
+
+def _get_child(obj, key):
+    if isinstance(key, jtu.GetAttrKey):
+        return getattr(obj, key.name)
+    if isinstance(key, jtu.DictKey):
+        return obj[key.key]
+    if isinstance(key, jtu.SequenceKey):
+        return obj[key.idx]
+    if isinstance(key, jtu.FlattenedIndexKey):
+        return obj[key.key]
+    raise TypeError(f"Unsupported key type: {type(key)!r}")
+
+
+def _resolve_path(root, path):
+    x = root
+    for key in path:
+        x = _get_child(x, key)
+    return x
+
+
+def make_layernorm_decay_mask(model):
+    params = eqx.filter(model, eqx.is_inexact_array)
+
+    def should_decay(path, leaf):
+        if leaf is None:
+            return False
+
+        parent = _resolve_path(model, path[:-1]) if path else None
+        last = path[-1] if path else None
+
+        node = model
+        inside_adaln = False
+        for key in path[:-1]:
+            node = _get_child(node, key)
+            if node.__class__.__name__ == "AdaLayerNorm":
+                inside_adaln = True
+                break
+
+        is_ln_weight_or_bias = (
+            isinstance(parent, eqx.nn.LayerNorm)
+            and isinstance(last, jax.tree_util.GetAttrKey)
+            and last.name in {"weight", "bias"}
+        )
+
+        return not (is_ln_weight_or_bias or inside_adaln)
+
+    return jax.tree.map_with_path(should_decay, params)
 
 
 @partial(
@@ -108,12 +161,12 @@ class ModalityInfos(MutableMapping[str, "ModalitySpec"]):
 
 
 def modality_dataloader(
-    modalities: dict[str, jax.Array],
+    modalities: dict[str, Array],
     n_batch: int,
     *,
-    key: jax.Array,
+    key: PRNGKeyArray,
     shuffle: bool = True,
-) -> Iterator[dict[str, jax.Array]]:
+) -> Iterator[dict[str, Array]]:
     names = tuple(modalities.keys())
     arrays = tuple(modalities[name] for name in names)
     n_samples = len(arrays[0])

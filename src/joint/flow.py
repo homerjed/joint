@@ -1,14 +1,18 @@
 from dataclasses import dataclass
 from functools import partial
 from typing import NamedTuple, Optional
+from collections.abc import Callable
 import jax
 import jax.numpy as jnp
 import jax.random as jr
 import equinox as eqx
 import diffrax as dfx
-from jaxtyping import Float, Array, PRNGKeyArray
+from jaxtyping import Float, Array, PRNGKeyArray, DTypeLike
 
 from .utils import ModalityInfos
+
+TimeScalar = Float[Array, ""] | float
+TimeEmbedder = Callable[[TimeScalar], Float[Array, "e"]]
 
 
 def clip_time(t, eps=1e-6):
@@ -60,9 +64,9 @@ class SolutionKwargs(NamedTuple):
 
 
 def get_timestep_embedding(
-    timesteps: jax.typing.ArrayLike, 
+    timesteps: TimeScalar, 
     embedding_dim: int, 
-    dtype=jnp.float32
+    dtype: DTypeLike = jnp.float32
 ) -> Float[Array, "e"]:
     # Convert scalar timesteps to an array
     if jnp.isscalar(timesteps):
@@ -81,7 +85,7 @@ def get_timestep_embedding(
     return emb
 
 
-def get_time_embedder(embedding_dim):
+def get_time_embedder(embedding_dim: int) -> TimeEmbedder:
     return partial(get_timestep_embedding, embedding_dim=embedding_dim)
 
 
@@ -160,6 +164,9 @@ def single_sample_modalities_fn_ode(
             name: (u[name] if name in modalities_to_sample else jnp.zeros_like(u[name]))
             for name in x.keys()
         }
+        # u = jax.tree.map(
+        #     lambda u: u ,
+        # )
         return u
     
     v = eqx.tree_inference(v, True)

@@ -108,7 +108,8 @@ def make_step(
     grad_fn = eqx.filter_value_and_grad(loss_fn)
     loss, grads = grad_fn(v, path, d, z, t, keys)
 
-    updates, opt_state = opt.update(grads, opt_state, v)
+    params = eqx.filter(v, eqx.is_inexact_array)
+    updates, opt_state = opt.update(grads, opt_state, params)
     v = eqx.apply_updates(v, updates)
 
     if v_ema is not None:

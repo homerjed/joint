@@ -2,6 +2,7 @@ import equinox as eqx
 import jax
 import jax.tree_util as jtu
 import optax
+from joint.transformer import AdaLayerNorm
 
 
 def _get_child(obj, key):
@@ -52,12 +53,20 @@ def make_layernorm_decay_mask(model):
         parent = _resolve_path(model, path[:-1]) if path else None
         last = path[-1] if path else None
 
+        node = model
+        inside_adaln = False
+        for key in path[:-1]:
+            node = _get_child(node, key)
+            if isinstance(node, AdaLayerNorm):
+                inside_adaln = True
+                break
+
         is_ln_weight_or_bias = (
             isinstance(parent, eqx.nn.LayerNorm)
             and isinstance(last, jtu.GetAttrKey)
             and last.name in {"weight", "bias"}
         )
-        return not is_ln_weight_or_bias
+        return not (is_ln_weight_or_bias or inside_adaln)
 
     return jtu.tree_map_with_path(should_decay, params)
 
