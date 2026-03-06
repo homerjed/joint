@@ -23,6 +23,7 @@ def clip_time(t, eps=1e-6):
 )
 @dataclass
 class OptimalTransportPath:
+    # Flow matching path
 
     def alpha(self, t):
         t = clip_time(t)
