@@ -15,13 +15,13 @@ def count_parameters(model):
 
 
 def _get_child(obj, key):
-    if isinstance(key, jtu.GetAttrKey):
+    if isinstance(key, jax.tree_util.GetAttrKey):
         return getattr(obj, key.name)
-    if isinstance(key, jtu.DictKey):
+    if isinstance(key, jax.tree_util.DictKey):
         return obj[key.key]
-    if isinstance(key, jtu.SequenceKey):
+    if isinstance(key, jax.tree_util.SequenceKey):
         return obj[key.idx]
-    if isinstance(key, jtu.FlattenedIndexKey):
+    if isinstance(key, jax.tree_util.FlattenedIndexKey):
         return obj[key.key]
     raise TypeError(f"Unsupported key type: {type(key)!r}")
 

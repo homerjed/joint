@@ -101,9 +101,9 @@ if __name__ == "__main__":
 
     Y = jnp.stack([A, B], axis=1)
     n_samples = len(X)
-    n_val = max(1, int(n_samples * val_fraction))
-    n_val = min(n_val, n_samples - 1)
-    n_train = n_samples - n_val
+    n_valid = max(1, int(n_samples * val_fraction))
+    n_valid = min(n_valid, n_samples - 1)
+    n_train = n_samples - n_valid
 
     # Dataloaders
     key, key_split = jr.split(key)
@@ -122,9 +122,9 @@ if __name__ == "__main__":
     b_ref = Y_train[ref_idx, 1]
 
     n_batch_train = max(1, int(config.train_config.n_batch))
-    n_batch_val = max(1, int(getattr(config.train_config, "n_batch_val", n_batch_train)))
-    n_batch_val = min(n_batch_val, len(X_valid))
-    n_val_batches = max(1, len(X_valid) // n_batch_val)
+    n_batch_valid = max(1, int(getattr(config.train_config, "n_batch_valid", n_batch_train)))
+    n_batch_valid = min(n_batch_valid, len(X_valid))
+    n_valid_batches = max(1, len(X_valid) // n_batch_valid)
 
     key, key_train_loader, key_valid_loader = jr.split(key, 3)
 
@@ -143,7 +143,7 @@ if __name__ == "__main__":
             "a": Y_valid[:, 0][:, jnp.newaxis], 
             "b": Y_valid[:, 1][:, jnp.newaxis]
         },
-        n_batch=n_batch_val,
+        n_batch=n_batch_valid,
         key=key_valid_loader,
         shuffle=False,
     )
@@ -253,7 +253,7 @@ if __name__ == "__main__":
     train_losses = []
     val_steps = []
     val_losses = []
-    last_val_loss = None
+    last_valid_loss = None
     with trange(
         start_step, 
         config.train_config.n_steps, 
@@ -283,18 +283,18 @@ if __name__ == "__main__":
                     v_ema if v_ema is not None else v,
                     path,
                     val_loader,
-                    n_val_batches,
+                    n_valid_batches,
                     key=key_eval,
                     solution_kwargs=solution_kwargs,
                 )
-                last_val_loss = float(val_loss)
+                last_valid_loss = float(val_loss)
                 val_steps.append(step)
-                val_losses.append(last_val_loss)
+                val_losses.append(last_valid_loss)
 
-            if last_val_loss is None:
+            if last_valid_loss is None:
                 steps.set_postfix(L=float(loss))
             else:
-                steps.set_postfix(L=float(loss), L_val=last_val_loss)
+                steps.set_postfix(L=float(loss), L_valid=last_valid_loss)
 
             if step % sample_every == 0:
 
