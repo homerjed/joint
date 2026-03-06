@@ -1,0 +1,7 @@
+.DS_Store
+__pycache__/
+samples/
+*.png
+*.eqx
+*.swp
+weight_mask_test.py
