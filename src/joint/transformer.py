@@ -6,10 +6,9 @@ import jax.random as jr
 import equinox as eqx
 from jaxtyping import Array, Float, PRNGKeyArray, Scalar, Bool
 
+from .naming import Modalities, ModalityInfos
 from .modules import ModalitiesEncoder, ModalitiesDecoder
 from .utils import ModalitySpec
-
-Modalities = dict[str, Array]
 
 
 class AdaLayerNorm(eqx.Module):
@@ -67,7 +66,7 @@ class AdaLayerNorm(eqx.Module):
         c: Float[Array, "c"]
     ) -> Float[Array, "x"]:
         if c is None:
-            return self.ln(x)
+            return self.ln(x) # NOTE: no shift/scale if there is no condition 
         scale = self.scale_proj(c)
         shift = self.shift_proj(c)
         return self.ln(x) * (1. + scale) + shift
@@ -117,7 +116,7 @@ class AttentionBlock(eqx.Module):
         input_x = jax.nn.gelu(input_x)
 
         if key is not None:
-            key1, key2 = jr.split(key, num=2)
+            key1, key2 = jr.split(key)
         else:
             key1 = key2 = None
 
@@ -131,7 +130,7 @@ class AttentionBlock(eqx.Module):
 
 
 class VisionTransformer(eqx.Module):
-    cls_token: jnp.ndarray
+    cls_token: Float[Array, "1 e"]
     attention_blocks: list[AttentionBlock]
     dropout: eqx.nn.Dropout
 
@@ -197,7 +196,7 @@ class FlowTransformer(eqx.Module):
 
     time_embedder: eqx.Module | Callable[[Scalar], Float[Array, "e"]]
 
-    modality_infos: dict[str, ModalitySpec]
+    modality_infos: ModalityInfos
 
     def __init__(
         self, 
@@ -205,7 +204,7 @@ class FlowTransformer(eqx.Module):
         modalities_decoder: ModalitiesDecoder, 
         transformer: VisionTransformer,
         time_embedder: eqx.Module,
-        modality_infos: dict[str, ModalitySpec]
+        modality_infos: ModalityInfos
     ):
         self.modalities_encoder = modalities_encoder
         self.modalities_decoder = modalities_decoder
@@ -241,9 +240,9 @@ class FlowTransformer(eqx.Module):
 
         if masks is not None:
             masks = {k: masks[k] for k in keys}
-            token_mask = jnp.concatenate([jnp.ravel(masks[k]) for k in keys], axis=0)
-            token_mask = token_mask.astype(jnp.bool_)
-            # Equinox expects mask shape (query_seq_length, kv_seq_length).
+            token_mask = jnp.concatenate([jnp.ravel(masks[k]) for k in keys])
+            token_mask = jnp.astype(token_mask, jnp.bool_)
+            # Mask shape (query_seq_length, kv_seq_length).
             mask = jnp.broadcast_to(
                 token_mask[jnp.newaxis, :],
                 (token_mask.shape[0], token_mask.shape[0]),
@@ -268,7 +267,7 @@ class FlowTransformer(eqx.Module):
         
         lengths = self.get_modalities_length(keys) 
         h = jax.tree.unflatten(jax.tree.structure(d), jnp.split(h, lengths))
-        # h = {k: x for k, x in zip(keys, h)} # same order
+        # h = {k: x for k, x in zip(keys, h)} # Same order
 
         v = self.modalities_decoder(h)
 

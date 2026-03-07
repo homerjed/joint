@@ -262,22 +262,26 @@ class ModalitySpec:
     # ======================================================
 
     def _validate_image(self):
-        if len(self.input_shape) != 3:
+        if len(self.input_shape) not in (2, 3):
             raise ValueError(
-                "Image modality requires input_shape = (C, H, W)."
+                "Image modality requires input_shape = (C, L) or (C, H, W)."
             )
 
         if self.patch_size is None:
             raise ValueError("Image modality requires patch_size.")
 
-        C, H, W = self.input_shape
-
-        if H % self.patch_size != 0 or W % self.patch_size != 0:
-            raise ValueError(
-                "patch_size must evenly divide image height and width."
-            )
-
-        expected_num_patches = (H // self.patch_size) * (W // self.patch_size)
+        if len(self.input_shape) == 3:
+            _, H, W = self.input_shape
+            if H % self.patch_size != 0 or W % self.patch_size != 0:
+                raise ValueError(
+                    "patch_size must evenly divide image height and width."
+                )
+            expected_num_patches = (H // self.patch_size) * (W // self.patch_size)
+        else:
+            _, L = self.input_shape
+            if L % self.patch_size != 0:
+                raise ValueError("patch_size must evenly divide 1D image length.")
+            expected_num_patches = L // self.patch_size
 
         if self.sequence_length is not None:
             if self.sequence_length != expected_num_patches:

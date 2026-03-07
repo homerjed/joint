@@ -1,4 +1,3 @@
-from typing import Optional
 from pathlib import Path
 import importlib
 import json
@@ -110,14 +109,19 @@ def load_json_config(path):
     return _to_config_node(_normalize_config_schema(decoded))
 
 
-def get_config(config_path: Path | str, *, reload: bool = True, seed: int = 0) -> ConfigNode:
+def get_config(
+    config_path: Path | str, 
+    *, 
+    reload: bool = True, 
+    seed: int = 0
+) -> ConfigNode:
 
     default_config = {
         "seed": seed,
         "data_config": {
             "n_samples": 10_000,
             "n_channels": 1,
-            "n_pix": 32,
+            "n_pix": 64,
             "parameter_shape": (2,),
             "val_fraction": 0.1,
         },

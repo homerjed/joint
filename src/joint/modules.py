@@ -1,4 +1,4 @@
-from typing import Optional, Callable
+from typing import Optional, Callable, Sequence
 from functools import partial
 from math import prod
 import jax
@@ -15,22 +15,27 @@ class PatchEmbedding(eqx.Module):
     linear: eqx.nn.Linear
     patch_size: int
     position_embedding: Array
+    spatial_ndim: int
 
     def __init__(
         self,
-        input_channels: int,
+        input_shape: tuple[int, ...],
         output_shape: int,
         patch_size: int,
         num_patches: int,
         embedding_dim: int,
         key: PRNGKeyArray
     ):
+        if len(input_shape) not in (2, 3):
+            raise ValueError("PatchEmbedding expects input_shape as (C, L) or (C, H, W).")
         self.patch_size = patch_size
+        self.spatial_ndim = len(input_shape) - 1
+        input_channels = input_shape[0]
 
         key_linear, key_embedding = jr.split(key)
 
         self.linear = eqx.nn.Linear(
-            self.patch_size ** 2 * input_channels,
+            (self.patch_size ** self.spatial_ndim) * input_channels,
             output_shape,
             key=key_linear
         )
@@ -40,15 +45,24 @@ class PatchEmbedding(eqx.Module):
 
     def __call__(
         self, 
-        x: Float[Array, "c h w"],
+        x: Float[Array, "..."],
         position_embed: bool = True
     ) -> Float[Array, "s e"]:
-        x = rearrange(
-            x,
-            "c (h ph) (w pw) -> (h w) (c ph pw)",
-            ph=self.patch_size,
-            pw=self.patch_size,
-        )
+        if self.spatial_ndim == 2:
+            x = rearrange(
+                x,
+                "c (h ph) (w pw) -> (h w) (c ph pw)",
+                ph=self.patch_size,
+                pw=self.patch_size,
+            )
+        elif self.spatial_ndim == 1:
+            x = rearrange(
+                x,
+                "c (l p) -> l (c p)",
+                p=self.patch_size,
+            )
+        else:
+            raise ValueError("PatchEmbedding only supports 1D and 2D spatial inputs.")
 
         x = jax.vmap(self.linear)(x)
 
@@ -84,7 +98,7 @@ class ParameterDecoder(eqx.Module):
         self.linear = eqx.nn.Linear(embedding_dim, dim, key=key)
 
     def __call__(self, p: Float[Array, "1 e"]) -> Float[Array, "p"]:
-        return self.linear(self.norm(jnp.squeeze(p, axis=0))) # Remove axis from sequence stacking
+        return self.linear(self.norm(jnp.squeeze(p, axis=0))) # Remove first axis (from sequence stacking)
 
 
 class ImageDecoder(eqx.Module):
@@ -92,12 +106,19 @@ class ImageDecoder(eqx.Module):
     linear: eqx.nn.Linear
     unpatchify: Callable
 
-    def __init__(self, embedding_dim, dim, patch_size, image_shape, key):
+    def __init__(
+        self, 
+        embedding_dim: int, 
+        dim: int, 
+        patch_size: int, 
+        image_shape: Sequence[int], 
+        key: PRNGKeyArray
+    ):
         self.norm = eqx.nn.LayerNorm(embedding_dim)
         self.linear = eqx.nn.Linear(embedding_dim, dim, key=key)
         self.unpatchify = get_unpatchify(image_shape, patch_size) 
 
-    def __call__(self, x: Float[Array, "s e"]) -> Float[Array, "c h w"]:
+    def __call__(self, x: Float[Array, "s e"]) -> Float[Array, "..."]:
         x = jax.vmap(self.norm)(x)
         x = jax.vmap(self.linear)(x)
         x = self.unpatchify(x)
@@ -107,9 +128,8 @@ class ImageDecoder(eqx.Module):
 def _get_modality_encoder_module(name, modality_infos, key):
     modality = modality_infos[name]
     if modality.modality_type == "image":
-        n_channels = modality.input_shape[0]
         module = PatchEmbedding(
-            input_channels=n_channels, 
+            input_shape=modality.input_shape,
             output_shape=modality.embedding_dim, 
             patch_size=modality.patch_size,
             embedding_dim=modality.embedding_dim,
@@ -123,18 +143,31 @@ def _get_modality_encoder_module(name, modality_infos, key):
     
 
 def unpatchify(x, *, image_shape, patch_size):
-    c, H, W = image_shape
-    ph = pw = patch_size
-    h = H // ph
-    w = W // pw
-    assert x.shape[0] == h * w, (x.shape, h, w)
-    assert x.shape[1] == c * ph * pw, (x.shape, c, ph, pw)
-
-    return rearrange(
-        x,
-        "(h w) (c ph pw) -> c (h ph) (w pw)",
-        h=h, w=w, c=c, ph=ph, pw=pw
-    )
+    if len(image_shape) == 3:
+        c, H, W = image_shape
+        ph = pw = patch_size
+        h = H // ph
+        w = W // pw
+        assert x.shape[0] == h * w, (x.shape, h, w)
+        assert x.shape[1] == c * ph * pw, (x.shape, c, ph, pw)
+        return rearrange(
+            x,
+            "(h w) (c ph pw) -> c (h ph) (w pw)",
+            h=h, w=w, c=c, ph=ph, pw=pw
+        )
+    if len(image_shape) == 2:
+        c, L = image_shape
+        p = patch_size
+        l = L // p
+        assert x.shape[0] == l, (x.shape, l)
+        assert x.shape[1] == c * p, (x.shape, c, p)
+        return rearrange(
+            x,
+            "l (c p) -> c (l p)",
+            c=c,
+            p=p,
+        )
+    raise ValueError("unpatchify expects image_shape as (C, L) or (C, H, W).")
 
 
 def get_unpatchify(image_shape, patch_size):
@@ -147,7 +180,8 @@ def _get_modality_decoder_module(name, modality_infos, key):
     modality = modality_infos[name]
     if modality.modality_type == "image":
         n_channels = modality_infos[name].input_shape[0]
-        dim = modality.patch_size ** 2 * n_channels 
+        spatial_ndim = len(modality.input_shape) - 1
+        dim = modality.patch_size ** spatial_ndim * n_channels
         module = ImageDecoder(
             modality.embedding_dim, 
             dim, 
@@ -192,7 +226,11 @@ class ModalitiesEncoder(eqx.Module):
             )
         )
 
-    def __call__(self, d: dict[str, Float[Array, "..."]], stacked=False) -> dict[str, Float[Array, "..."]]:
+    def __call__(
+        self, 
+        d: dict[str, Float[Array, "..."]], 
+        stacked: bool = False
+    ) -> dict[str, Float[Array, "..."]] | Float[Array, "..."]:
         e = jax.tree.map(
             lambda d, e: jnp.atleast_2d(e(d)), 
             d, 
@@ -226,7 +264,10 @@ class ModalitiesDecoder(eqx.Module):
             )
         )
 
-    def __call__(self, e: dict[str, Float[Array, "..."]]) -> dict[str, Float[Array, "..."]]:
+    def __call__(
+        self, 
+        e: dict[str, Float[Array, "..."]]
+    ) -> dict[str, Float[Array, "..."]]:
         d = jax.tree.map(
             lambda e, d: d(e),
             e, 

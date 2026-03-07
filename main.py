@@ -334,14 +334,18 @@ if __name__ == "__main__":
                 Z_fixed_ab["a"] = jnp.full((sample_n_samples ** 2, 1), a_ref)
                 Z_fixed_ab["b"] = jnp.full((sample_n_samples ** 2, 1), b_ref)
 
-                sample_fn_fixed_ab = lambda z: single_sample_modalities_fn_ode(
+                key, key_cond_ab = jr.split(key)
+                cond_keys_ab = jr.split(key_cond_ab, sample_n_samples ** 2)
+                sample_fn_fixed_ab = lambda z, k: single_sample_modalities_fn_ode(
                     v, 
                     z, 
                     modality_infos=modality_infos, 
                     modalities_to_sample=["x"], 
-                    solution_kwargs=solution_kwargs
+                    solution_kwargs=solution_kwargs,
+                    key=k,
+                    bridge_path=path,
                 )
-                samples_fixed_ab = jax.vmap(sample_fn_fixed_ab)(Z_fixed_ab)
+                samples_fixed_ab = jax.vmap(sample_fn_fixed_ab)(Z_fixed_ab, cond_keys_ab)
                 generated_x_fixed_ab = rearrange(
                     samples_fixed_ab["x"], 
                     "(p q) c h w -> (p h) (q w) c", 
@@ -357,14 +361,18 @@ if __name__ == "__main__":
                 }
                 Z_fixed_x["x"] = jnp.repeat(x_fixed, sample_n_samples ** 2, axis=0)
 
-                sample_fn_fixed_x = lambda z: single_sample_modalities_fn_ode(
+                key, key_cond_x = jr.split(key)
+                cond_keys_x = jr.split(key_cond_x, sample_n_samples ** 2)
+                sample_fn_fixed_x = lambda z, k: single_sample_modalities_fn_ode(
                     v,
                     z,
                     modality_infos=modality_infos,
                     modalities_to_sample=["a", "b"],
-                    solution_kwargs=solution_kwargs
+                    solution_kwargs=solution_kwargs,
+                    key=k,
+                    bridge_path=path,
                 )
-                samples_fixed_x = jax.vmap(sample_fn_fixed_x)(Z_fixed_x)
+                samples_fixed_x = jax.vmap(sample_fn_fixed_x)(Z_fixed_x, cond_keys_x)
                 generated_a_grid = rearrange(
                     samples_fixed_x["a"],
                     "(p q) 1 -> p q",

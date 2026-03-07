@@ -137,26 +137,49 @@ def single_sample_modalities_fn_ode(
     modalities_to_sample: Optional[list[str]] = None, 
     *,
     solution_kwargs: SolutionKwargs, 
-    times: Optional[Float[Array, "T"]] = None
+    times: Optional[Float[Array, "T"]] = None,
+    key: Optional[PRNGKeyArray] = None,
+    bridge_path: Optional[OptimalTransportPath] = None,
 ) -> dict[str, Float[Array, "..."]]:
 
     if modalities_to_sample is not None:
         modalities_to_sample = frozenset(modalities_to_sample)
 
-    # Optional attention mask for restricting which modality tokens can be attended to.
+    if bridge_path is None:
+        bridge_path = OptimalTransportPath()
+
+    # Keep all modalities visible to attention during conditional sampling.
+    # Conditioning is enforced by freezing unsampled modalities via zero velocity.
     masks = None
+
+    fixed_names = ()
+    x_obs = {}
+    z_cond = {}
     if modalities_to_sample is not None:
-        masks = {}
-        for name in x_0.keys():
-            seq_len = modality_infos[name].sequence_length
-            if name not in modalities_to_sample:
-                masks[name] = jnp.zeros((seq_len,), dtype=jnp.bool_)
-            else:
-                masks[name] = jnp.ones((seq_len,), dtype=jnp.bool_)
+        fixed_names = tuple(name for name in x_0.keys() if name not in modalities_to_sample)
+        x_obs = {name: x_0[name] for name in fixed_names}
+        if key is not None and len(fixed_names) > 0:
+            noise_keys = jr.split(key, len(fixed_names))
+            z_cond = {
+                name: jr.normal(k, shape=x_0[name].shape, dtype=x_0[name].dtype)
+                for name, k in zip(fixed_names, noise_keys)
+            }
+        else:
+            z_cond = {name: jnp.zeros_like(x_0[name]) for name in fixed_names}
 
     def velocity(t, x, args):
-        (v, masks) = args # Same mask across time
-        u = v(x, t=t, masks=masks)
+        (v,) = args
+        x_model = x
+        if modalities_to_sample is not None and len(fixed_names) > 0:
+            x_model = {
+                name: (
+                    x[name]
+                    if name in modalities_to_sample
+                    else bridge_path.psi_t(t, x_obs[name], z_cond[name])
+                )
+                for name in x.keys()
+            }
+        u = v(x_model, t=t, masks=masks)
         if modalities_to_sample is None:
             return u
         # Set velocities of inputs that are NOT being sampled to zero
@@ -181,7 +204,7 @@ def single_sample_modalities_fn_ode(
         solution_kwargs.t1, 
         solution_kwargs.dt0, 
         x_0, 
-        args=(v, masks),
+        args=(v,),
         saveat=saveat
     )
     
@@ -194,3 +217,18 @@ def single_sample_modalities_fn_ode(
     )
 
     return x_1
+
+
+    # # Optional attention mask for restricting which modality tokens can be attended to.
+    # masks = None
+    # if modalities_to_sample is not None:
+    #     masks = {}
+    #     for name in x_0.keys():
+    #         seq_len = modality_infos[name].sequence_length
+    #         if name not in modalities_to_sample:
+    #             masks[name] = jnp.zeros((seq_len,), dtype=jnp.bool_)
+    #         else:
+    #             masks[name] = jnp.ones((seq_len,), dtype=jnp.bool_)
+
+    # def velocity(t, x, args):
+    #     (v, masks) = args # Same mask across time
