@@ -128,11 +128,11 @@ def get_config(
         "model_config": {
             "t_emb_dim": 8,
             "sigma_min": 1e-3,
-            "patch_size": 4,
+            "patch_size": 2,
             "hidden_dim": 256,
             "n_heads": 8,
             "embedding_dim": 32,
-            "n_blocks": 2,
+            "n_blocks": 4,
             "dropout_rate": 0.0,
         },
         "train_config": {

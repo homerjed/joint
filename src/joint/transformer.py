@@ -8,7 +8,6 @@ from jaxtyping import Array, Float, PRNGKeyArray, Scalar, Bool
 
 from .naming import Modalities, ModalityInfos
 from .modules import ModalitiesEncoder, ModalitiesDecoder
-from .utils import ModalitySpec
 
 
 class AdaLayerNorm(eqx.Module):
@@ -172,7 +171,7 @@ class VisionTransformer(eqx.Module):
                 mask = jnp.pad(mask, ((1, 0), (1, 0)), constant_values=True)
 
         if key is not None:
-            dropout_key, *attention_keys = jr.split(key, num=len(self.attention_blocks) + 1)
+            dropout_key, *attention_keys = jr.split(key, len(self.attention_blocks) + 1)
         else:
             dropout_key = None
             attention_keys = [None] * len(self.attention_blocks)

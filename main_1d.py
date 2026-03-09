@@ -76,6 +76,8 @@ if __name__ == "__main__":
     # generative model that is being used to train the transformer
 
     # TODO: allow for lognormal fields
+
+    # TODO: Create a second simulator that bijectively (and deterministically) generates the corresponding log-normal fields of the gaussian random fields in the training data, add these as another modality for the model to be trained on
  
     args = get_args()
 
@@ -141,6 +143,9 @@ if __name__ == "__main__":
 
     X_train, Y_train = X[train_idx], Y[train_idx]
     X_valid, Y_valid = X[valid_idx], Y[valid_idx]
+    x_plot_vmin, x_plot_vmax = [
+        float(v) for v in jnp.percentile(X_train, jnp.array([1.0, 99.0]))
+    ]
 
     # Fixed conditioning target for conditional sampling diagnostics.
     key, key_ref_idx = jr.split(key)
@@ -339,8 +344,8 @@ if __name__ == "__main__":
                 ax.imshow(
                     generated_samples,
                     cmap="coolwarm",
-                    vmin=X_train.min(),
-                    vmax=X_train.max(),
+                    vmin=x_plot_vmin,
+                    vmax=x_plot_vmax,
                     aspect="auto",
                 )
                 ax.set_title("Generated x")
@@ -348,8 +353,8 @@ if __name__ == "__main__":
                 ax.imshow(
                     train_samples,
                     cmap="coolwarm",
-                    vmin=X_train.min(),
-                    vmax=X_train.max(),
+                    vmin=x_plot_vmin,
+                    vmax=x_plot_vmax,
                     aspect="auto",
                 )
                 ax.set_title("Train x")
@@ -419,8 +424,8 @@ if __name__ == "__main__":
                 ax.imshow(
                     generated_x_fixed_ab,
                     cmap="coolwarm",
-                    vmin=X_train.min(),
-                    vmax=X_train.max(),
+                    vmin=x_plot_vmin,
+                    vmax=x_plot_vmax,
                     aspect="auto",
                 )
                 ax.set_title(f"Generated x | fixed a,b=({float(a_ref):.2f},{float(b_ref):.2f})")
