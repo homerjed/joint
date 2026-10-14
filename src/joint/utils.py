@@ -11,10 +11,27 @@ from jaxtyping import PRNGKeyArray, Array
 
 
 def count_parameters(model):
+    """Count trainable array elements in an Equinox model.
+
+    Inputs:
+        model (eqx.Module): Model pytree.
+
+    Outputs:
+        int: Total number of scalar array parameters.
+    """
     return sum(jax.tree.leaves(jax.tree.map(jnp.size, eqx.filter(model, eqx.is_array))))
 
 
 def _get_child(obj, key):
+    """Resolve a tree path key against an object or container.
+
+    Inputs:
+        obj (Any): Current tree node.
+        key (jax.tree_util.*Key): Tree key object.
+
+    Outputs:
+        Any: Child object referenced by ``key``.
+    """
     if isinstance(key, jax.tree_util.GetAttrKey):
         return getattr(obj, key.name)
     if isinstance(key, jax.tree_util.DictKey):
@@ -27,6 +44,15 @@ def _get_child(obj, key):
 
 
 def _resolve_path(root, path):
+    """Resolve a sequence of tree keys from a root object.
+
+    Inputs:
+        root (Any): Root object.
+        path (Sequence[jax.tree_util.*Key]): Tree path keys.
+
+    Outputs:
+        Any: Object at the end of the path.
+    """
     x = root
     for key in path:
         x = _get_child(x, key)
@@ -34,6 +60,14 @@ def _resolve_path(root, path):
 
 
 def make_layernorm_decay_mask(model):
+    """Build an Optax mask that disables weight decay for normalization params.
+
+    Inputs:
+        model (eqx.Module): Model containing LayerNorm/AdaLayerNorm modules.
+
+    Outputs:
+        PyTree[bool]: Boolean mask aligned with inexact parameter leaves.
+    """
     params = eqx.filter(model, eqx.is_inexact_array)
 
     def should_decay(path, leaf):
@@ -69,7 +103,14 @@ def make_layernorm_decay_mask(model):
 )
 @dataclass
 class ModalityInfos(MutableMapping[str, "ModalitySpec"]):
-    """Dataclass-backed mapping with attribute access and runtime type checks."""
+    """Dataclass-backed modality map with attribute access and validation.
+
+    Inputs:
+        data (dict[str, ModalitySpec]): Mapping from modality names to specs.
+
+    Outputs:
+        ModalityInfos: Mutable mapping enforcing key/value type and consistency checks.
+    """
 
     data: dict[str, "ModalitySpec"] = field(default_factory=dict)
 
@@ -167,6 +208,17 @@ def modality_dataloader(
     key: PRNGKeyArray,
     shuffle: bool = True,
 ) -> Iterator[dict[str, Array]]:
+    """Yield modality-aligned mini-batches from in-memory arrays.
+
+    Inputs:
+        modalities (dict[str, Array]): Modalities sharing the same leading sample axis.
+        n_batch (int): Batch size.
+        key (PRNGKeyArray): Random key used for shuffling.
+        shuffle (bool): Whether to reshuffle indices each epoch.
+
+    Outputs:
+        Iterator[dict[str, Array]]: Infinite iterator yielding modality batch dictionaries.
+    """
     names = tuple(modalities.keys())
     arrays = tuple(modalities[name] for name in names)
     n_samples = len(arrays[0])
@@ -188,6 +240,16 @@ def modality_dataloader(
 
 
 def tree_random_normal_like(tree, key, dtype=None):
+    """Sample Gaussian noise tree with the same structure/shapes as input tree.
+
+    Inputs:
+        tree (PyTree[Array]): Reference tree.
+        key (PRNGKeyArray): Random key.
+        dtype (dtype | None): Optional dtype override for generated leaves.
+
+    Outputs:
+        PyTree[Array]: Noise tree with same treedef/shapes as ``tree``.
+    """
     leaves, treedef = jax.tree.flatten(tree)
     keys = jr.split(key, len(leaves))
     new_leaves = [
@@ -198,6 +260,16 @@ def tree_random_normal_like(tree, key, dtype=None):
 
 
 def apply_ema(ema_model, model, ema_rate=0.999):
+    """Apply exponential moving average update to model parameters.
+
+    Inputs:
+        ema_model (eqx.Module): Previous EMA model.
+        model (eqx.Module): Current model.
+        ema_rate (float): EMA keep factor in ``[0, 1)``.
+
+    Outputs:
+        eqx.Module: Updated EMA model.
+    """
     m_, _m = eqx.partition(model, eqx.is_inexact_array)
     e_, _e = eqx.partition(ema_model, eqx.is_inexact_array)
     ema_fn = lambda p_ema, p: p_ema * ema_rate + p * (1. - ema_rate)
@@ -219,6 +291,19 @@ def apply_ema(ema_model, model, ema_rate=0.999):
 )
 @dataclass
 class ModalitySpec:
+    """Specification describing one modality's data/tokenization dimensions.
+
+    Inputs:
+        name (str): Modality name.
+        modality_type (Literal): One of ``image``, ``vector``, or ``graph``.
+        input_shape (tuple[int, ...]): Raw modality shape.
+        patch_size (int | None): Patch size for image modalities.
+        sequence_length (int | None): Token count for the modality.
+        embedding_dim (int | None): Token embedding width.
+
+    Outputs:
+        ModalitySpec: Validated immutable-like metadata record.
+    """
     name: str
     modality_type: Literal["image", "vector", "graph"]
 
@@ -262,6 +347,15 @@ class ModalitySpec:
     # ======================================================
 
     def _validate_image(self):
+        """Validate tokenization consistency for image-like modalities.
+
+        Inputs:
+            self.input_shape (tuple[int, ...]): ``(C, L)`` or ``(C, H, W)`` shape.
+            self.patch_size (int): Patch size.
+
+        Outputs:
+            None: Updates/validates ``sequence_length`` in place.
+        """
         if len(self.input_shape) not in (2, 3):
             raise ValueError(
                 "Image modality requires input_shape = (C, L) or (C, H, W)."
@@ -306,6 +400,14 @@ class ModalitySpec:
     # ======================================================
 
     def _validate_vector(self):
+        """Validate vector modality configuration.
+
+        Inputs:
+            self.input_shape (tuple[int, ...]): Vector shape ``(D,)``.
+
+        Outputs:
+            None: Ensures vector constraints and default sequence length.
+        """
         if len(self.input_shape) != 1:
             raise ValueError(
                 "Vector modality requires input_shape = (D,)."
@@ -325,6 +427,14 @@ class ModalitySpec:
     # ======================================================
 
     def _validate_graph(self):
+        """Validate graph modality configuration.
+
+        Inputs:
+            self.input_shape (tuple[int, ...]): Graph shape ``(num_nodes, node_dim)``.
+
+        Outputs:
+            None: Ensures graph constraints and default sequence length.
+        """
         if len(self.input_shape) != 2:
             raise ValueError(
                 "Graph modality expects input_shape = (num_nodes, node_feat_dim)."
@@ -339,67 +449,3 @@ class ModalitySpec:
             raise ValueError(
                 "Graph modality should not define patch_size or num_patches."
             )
-
-
-def grf2d_powerlaw(
-    key,
-    A: float,
-    B: float,
-    n: int,
-    L: float,
-    k0: float = 1.0,
-    mean: float = 0.0,
-    zero_mode: float = 0.0,
-    eps: float = 1e-12,
-):
-    # Frequencies (cycles per unit length) -> convert to angular wavenumbers (2π * freq)
-    kx = 2.0 * jnp.pi * jnp.fft.fftfreq(n, d=L / n)      # shape (n,)
-    ky = 2.0 * jnp.pi * jnp.fft.rfftfreq(n, d=L / n)     # shape (n//2 + 1,)
-
-    KX, KY = jnp.meshgrid(kx, ky, indexing="ij")         # shapes (n, n//2+1)
-    k = jnp.sqrt(KX**2 + KY**2)
-
-    # Power spectrum
-    # Avoid k=0 issues with eps; we'll override the exact zero mode anyway.
-    Pk = A * jnp.power((jnp.maximum(k, eps) / k0), B)
-
-    # Draw complex Gaussian coefficients with variance ~Pk:
-    # F = (N(0,1)+iN(0,1)) * sqrt(Pk/2)
-    key_re, key_im = jax.random.split(key, 2)
-    re = jax.random.normal(key_re, shape=Pk.shape)
-    im = jax.random.normal(key_im, shape=Pk.shape)
-    F = (re + 1j * im) * jnp.sqrt(Pk / 2.0)
-
-    # Set k=0 mode explicitly (mean control)
-    F = F.at[0, 0].set(zero_mode + 0.0j)
-
-    # Inverse FFT to real space (JAX uses numpy-style normalization: irfftn includes 1/N)
-    field = jnp.fft.irfftn(F, s=(n, n))
-
-    # Optional: normalize overall scaling to be less "FFT-convention dependent".
-    # This makes typical field variance scale more directly with A when changing n.
-    # If you prefer raw FFT convention, remove the * (n*n)**0.5 factor.
-    field = field * jnp.sqrt(n * n)
-
-    return field + mean
-
-
-def gaussian_to_lognormal_delta(g: jnp.ndarray, axis=None, clip=None) -> jnp.ndarray:
-    # (Optional) enforce zero-mean before mapping; helps if your GRF has residual mean
-    g0 = g - jnp.mean(g, axis=axis, keepdims=True)
-    var = jnp.var(g0, axis=axis, keepdims=True)
-
-    if clip is not None:
-        g0 = jnp.clip(g0, -clip, clip)
-
-    return jnp.exp(g0 - 0.5 * var) - 1.0
-
-
-def gaussian_to_lognormal_positive(g: jnp.ndarray, axis=None, clip=None) -> jnp.ndarray:
-    g0 = g - jnp.mean(g, axis=axis, keepdims=True)
-    var = jnp.var(g0, axis=axis, keepdims=True)
-
-    if clip is not None:
-        g0 = jnp.clip(g0, -clip, clip)
-
-    return jnp.exp(g0 - 0.5 * var)

@@ -6,3 +6,4 @@ samples/
 *.eqx
 *.swp
 weight_mask_test.py
+backups/

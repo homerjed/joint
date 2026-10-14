@@ -12,7 +12,21 @@ from .utils import ModalityInfos, ModalitySpec
 
 
 class PatchEmbedding(eqx.Module):
-    linear: eqx.nn.Linear
+    """Encode 1D/2D image-like tensors into patch tokens with a small conv stem.
+
+    Inputs:
+        input_shape (tuple[int, ...]): Input shape as ``(C, L)`` or ``(C, H, W)``.
+        output_shape (int): Patch embedding width.
+        patch_size (int): Spatial patch size.
+        num_patches (int): Number of patch tokens.
+        embedding_dim (int): Positional embedding width.
+        key (PRNGKeyArray): Random key for parameter initialization.
+
+    Outputs:
+        Array: Sequence of patch embeddings with shape ``(num_patches, embedding_dim)``.
+    """
+    stem_conv1: eqx.Module
+    stem_conv2: eqx.Module
     patch_size: int
     position_embedding: Array
     spatial_ndim: int
@@ -28,51 +42,86 @@ class PatchEmbedding(eqx.Module):
     ):
         if len(input_shape) not in (2, 3):
             raise ValueError("PatchEmbedding expects input_shape as (C, L) or (C, H, W).")
+
         self.patch_size = patch_size
         self.spatial_ndim = len(input_shape) - 1
+        spatial_shape = input_shape[1:]
+        if any(length % patch_size != 0 for length in spatial_shape):
+            raise ValueError(
+                "PatchEmbedding expects every spatial dimension to be divisible by patch_size."
+            )
+
         input_channels = input_shape[0]
+        stem_hidden_dim = output_shape
+        local_kernel_size = 7
 
-        key_linear, key_embedding = jr.split(key)
+        key_conv1, key_conv2, key_embedding = jr.split(key, 3)
 
-        self.linear = eqx.nn.Linear(
-            (self.patch_size ** self.spatial_ndim) * input_channels,
+        # First mix local neighborhoods at full spatial resolution, then downsample
+        # to the same non-overlapping patch grid used by the decoder.
+        self.stem_conv1 = eqx.nn.Conv(
+            self.spatial_ndim,
+            input_channels,
+            stem_hidden_dim,
+            kernel_size=local_kernel_size,
+            padding=local_kernel_size // 2,
+            key=key_conv1,
+        )
+        self.stem_conv2 = eqx.nn.Conv(
+            self.spatial_ndim,
+            stem_hidden_dim,
             output_shape,
-            key=key_linear
+            kernel_size=patch_size,
+            stride=patch_size,
+            key=key_conv2,
         )
 
         # NOTE: pos embed had extra dim for cls_token
-        self.position_embedding = jr.normal(key_embedding, (num_patches, embedding_dim)) * 0.02
+        self.position_embedding = (
+            jr.normal(key_embedding, (num_patches, embedding_dim)) * 0.02
+        )
 
     def __call__(
         self, 
         x: Float[Array, "..."],
         position_embed: bool = True
     ) -> Float[Array, "s e"]:
-        if self.spatial_ndim == 2:
-            x = rearrange(
-                x,
-                "c (h ph) (w pw) -> (h w) (c ph pw)",
-                ph=self.patch_size,
-                pw=self.patch_size,
-            )
-        elif self.spatial_ndim == 1:
-            x = rearrange(
-                x,
-                "c (l p) -> l (c p)",
-                p=self.patch_size,
-            )
-        else:
-            raise ValueError("PatchEmbedding only supports 1D and 2D spatial inputs.")
+        """Embed an image-like modality into patch tokens.
 
-        x = jax.vmap(self.linear)(x)
+        Inputs:
+            x (Array): Input tensor in ``(C, L)`` or ``(C, H, W)`` format.
+            position_embed (bool): If ``True``, add learned positional embeddings.
+
+        Outputs:
+            Array: Patch token sequence with shape ``(S, E)``.
+        """
+        x = self.stem_conv1(x)
+        x = jax.nn.gelu(x)
+        x = self.stem_conv2(x)
+
+        if self.spatial_ndim == 2:
+            x = rearrange(x, "e h w -> (h w) e")
+        else:
+            x = rearrange(x, "e l -> l e")
 
         if position_embed:
+            assert x.shape == self.position_embedding.shape
             x = x + self.position_embedding
 
         return x
 
 
 class ParameterEmbedding(eqx.Module):
+    """Project a vector modality into embedding space.
+
+    Inputs:
+        input_shape (int): Vector dimension.
+        embedding_dim (int): Output embedding width.
+        key (PRNGKeyArray): Random key for parameter initialization.
+
+    Outputs:
+        Array: Embedded vector token with shape ``(embedding_dim,)``.
+    """
     linear: eqx.nn.Linear
     modality_embedding: Float[Array, "e"]
 
@@ -86,10 +135,28 @@ class ParameterEmbedding(eqx.Module):
         self.modality_embedding = jr.normal(key, (embedding_dim,)) * 0.02
 
     def __call__(self, p: Float[Array, "p"]) -> Float[Array, "e"]:
+        """Embed a parameter vector.
+
+        Inputs:
+            p (Array): Vector modality input.
+
+        Outputs:
+            Array: Embedded token vector.
+        """
         return self.linear(p) + self.modality_embedding
 
 
 class ParameterDecoder(eqx.Module):
+    """Decode a single parameter token back to vector space.
+
+    Inputs:
+        embedding_dim (int): Token embedding width.
+        dim (int): Output vector dimension.
+        key (PRNGKeyArray): Random key for parameter initialization.
+
+    Outputs:
+        Array: Decoded vector modality.
+    """
     norm: eqx.nn.LayerNorm
     linear: eqx.nn.Linear
 
@@ -98,10 +165,30 @@ class ParameterDecoder(eqx.Module):
         self.linear = eqx.nn.Linear(embedding_dim, dim, key=key)
 
     def __call__(self, p: Float[Array, "1 e"]) -> Float[Array, "p"]:
+        """Decode a one-token sequence into a vector.
+
+        Inputs:
+            p (Array): Sequence with one token.
+
+        Outputs:
+            Array: Decoded vector.
+        """
         return self.linear(self.norm(jnp.squeeze(p, axis=0))) # Remove first axis (from sequence stacking)
 
 
 class ImageDecoder(eqx.Module):
+    """Decode patch tokens back into image-like tensors.
+
+    Inputs:
+        embedding_dim (int): Token embedding width.
+        dim (int): Per-token decoded patch dimension.
+        patch_size (int): Spatial patch size used for tokenization.
+        image_shape (Sequence[int]): Target shape ``(C, L)`` or ``(C, H, W)``.
+        key (PRNGKeyArray): Random key for parameter initialization.
+
+    Outputs:
+        Array: Reconstructed modality in original image-like shape.
+    """
     norm: eqx.nn.LayerNorm
     linear: eqx.nn.Linear
     unpatchify: Callable
@@ -119,6 +206,14 @@ class ImageDecoder(eqx.Module):
         self.unpatchify = get_unpatchify(image_shape, patch_size) 
 
     def __call__(self, x: Float[Array, "s e"]) -> Float[Array, "..."]:
+        """Decode patch token sequence to original image-like layout.
+
+        Inputs:
+            x (Array): Sequence of patch tokens.
+
+        Outputs:
+            Array: Reconstructed tensor.
+        """
         x = jax.vmap(self.norm)(x)
         x = jax.vmap(self.linear)(x)
         x = self.unpatchify(x)
@@ -126,6 +221,16 @@ class ImageDecoder(eqx.Module):
 
 
 def _get_modality_encoder_module(name, modality_infos, key):
+    """Instantiate encoder module for one modality.
+
+    Inputs:
+        name (str): Modality name.
+        modality_infos (ModalityInfos): Modality metadata map.
+        key (PRNGKeyArray): Random key for module initialization.
+
+    Outputs:
+        eqx.Module: Encoder module matching modality type.
+    """
     modality = modality_infos[name]
     if modality.modality_type == "image":
         module = PatchEmbedding(
@@ -142,7 +247,55 @@ def _get_modality_encoder_module(name, modality_infos, key):
     return module
     
 
-def unpatchify(x, *, image_shape, patch_size):
+def _patchify(x, *, image_shape, patch_size):
+    """Split image-like tensors into flattened patch tokens.
+
+    Inputs:
+        x (Array): Input tensor in ``(C, L)`` or ``(C, H, W)`` layout.
+        image_shape (Sequence[int]): Expected input shape.
+        patch_size (int): Spatial patch size.
+
+    Outputs:
+        Array: Patch matrix with shape ``(S, patch_dim)``.
+    """
+    if len(image_shape) == 3:
+        c, H, W = image_shape
+        ph = pw = patch_size
+        assert x.shape == (c, H, W), (x.shape, (c, H, W))
+        return rearrange(
+            x,
+            "c (h ph) (w pw) -> (h w) (c ph pw)",
+            ph=ph,
+            pw=pw,
+        )
+    if len(image_shape) == 2:
+        c, L = image_shape
+        p = patch_size
+        assert x.shape == (c, L), (x.shape, (c, L))
+        return rearrange(
+            x,
+            "c (l p) -> l (c p)",
+            p=p,
+        )
+    raise ValueError("patchify expects image_shape as (C, L) or (C, H, W).")
+
+
+def get_patchify(image_shape, patch_size):
+    """Create a ``patchify`` function bound to shape and patch size."""
+    return partial(_patchify, image_shape=image_shape, patch_size=patch_size)
+
+
+def _unpatchify(x, *, image_shape, patch_size):
+    """Reassemble flattened patch vectors into image-like tensors.
+
+    Inputs:
+        x (Array): Patch matrix with shape ``(S, patch_dim)``.
+        image_shape (Sequence[int]): Target shape ``(C, L)`` or ``(C, H, W)``.
+        patch_size (int): Spatial patch size used in tokenization.
+
+    Outputs:
+        Array: Reconstructed tensor in ``image_shape`` layout.
+    """
     if len(image_shape) == 3:
         c, H, W = image_shape
         ph = pw = patch_size
@@ -171,10 +324,29 @@ def unpatchify(x, *, image_shape, patch_size):
 
 
 def get_unpatchify(image_shape, patch_size):
-    return partial(unpatchify, image_shape=image_shape, patch_size=patch_size)
+    """Create an ``unpatchify`` function bound to shape and patch size.
+
+    Inputs:
+        image_shape (Sequence[int]): Target shape ``(C, L)`` or ``(C, H, W)``.
+        patch_size (int): Patch size used for tokenization.
+
+    Outputs:
+        Callable: Function mapping patch tokens back to image-like tensors.
+    """
+    return partial(_unpatchify, image_shape=image_shape, patch_size=patch_size)
 
 
 def _get_modality_decoder_module(name, modality_infos, key):
+    """Instantiate decoder module for one modality.
+
+    Inputs:
+        name (str): Modality name.
+        modality_infos (ModalityInfos): Modality metadata map.
+        key (PRNGKeyArray): Random key for module initialization.
+
+    Outputs:
+        eqx.Module: Decoder module matching modality type.
+    """
     # Assign decoding modules to corresponding modalities 
     # - possibly assign by 'modality_infos.modality_type == "image"' or something
     modality = modality_infos[name]
@@ -196,14 +368,41 @@ def _get_modality_decoder_module(name, modality_infos, key):
 
 
 def _get_encoders(encoders, keys):
+    """Select encoder submodules for a given modality key order.
+
+    Inputs:
+        encoders (dict[str, eqx.Module]): All modality encoders.
+        keys (Iterable[str]): Requested modality ordering.
+
+    Outputs:
+        dict[str, eqx.Module]: Encoder mapping restricted to ``keys`` order.
+    """
     return dict(zip(keys, [encoders[key] for key in keys]))
 
 
 def _get_decoders(decoders, keys):
+    """Select decoder submodules for a given modality key order.
+
+    Inputs:
+        decoders (dict[str, eqx.Module]): All modality decoders.
+        keys (Iterable[str]): Requested modality ordering.
+
+    Outputs:
+        dict[str, eqx.Module]: Decoder mapping restricted to ``keys`` order.
+    """
     return dict(zip(keys, [decoders[key] for key in keys]))
 
 
 class ModalitiesEncoder(eqx.Module):
+    """Encode a dictionary of modalities into token embeddings.
+
+    Inputs:
+        modality_infos (ModalityInfos): Modality metadata definitions.
+        key (PRNGKeyArray): Random key for module initialization.
+
+    Outputs:
+        dict[str, Array] | Array: Per-modality embeddings or one concatenated sequence.
+    """
     encoders: dict[str, eqx.Module]
 
     def __init__(
@@ -231,6 +430,15 @@ class ModalitiesEncoder(eqx.Module):
         d: dict[str, Float[Array, "..."]], 
         stacked: bool = False
     ) -> dict[str, Float[Array, "..."]] | Float[Array, "..."]:
+        """Encode modalities to token space.
+
+        Inputs:
+            d (dict[str, Array]): Modalities keyed by name.
+            stacked (bool): If ``True``, concatenate all modality tokens.
+
+        Outputs:
+            dict[str, Array] | Array: Encoded tokens per modality or as one sequence.
+        """
         e = jax.tree.map(
             lambda d, e: jnp.atleast_2d(e(d)), 
             d, 
@@ -242,6 +450,15 @@ class ModalitiesEncoder(eqx.Module):
 
 
 class ModalitiesDecoder(eqx.Module):
+    """Decode per-modality token embeddings back to data space.
+
+    Inputs:
+        modality_infos (ModalityInfos): Modality metadata definitions.
+        key (PRNGKeyArray): Random key for module initialization.
+
+    Outputs:
+        dict[str, Array]: Decoded modalities keyed by name.
+    """
     decoders: dict[str, eqx.Module | ParameterDecoder]
 
     def __init__(
@@ -268,6 +485,14 @@ class ModalitiesDecoder(eqx.Module):
         self, 
         e: dict[str, Float[Array, "..."]]
     ) -> dict[str, Float[Array, "..."]]:
+        """Decode token embeddings into modality tensors.
+
+        Inputs:
+            e (dict[str, Array]): Per-modality token sequences.
+
+        Outputs:
+            dict[str, Array]: Decoded modality tensors.
+        """
         d = jax.tree.map(
             lambda e, d: d(e),
             e, 

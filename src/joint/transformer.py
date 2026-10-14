@@ -1,82 +1,90 @@
-from typing import Optional, Sequence, Callable
-from itertools import accumulate
+from typing import Optional
 import jax
 import jax.numpy as jnp
 import jax.random as jr
 import equinox as eqx
-from jaxtyping import Array, Float, PRNGKeyArray, Scalar, Bool
+from jaxtyping import Array, Float, PRNGKeyArray, Scalar, Bool, Int
 
-from .naming import Modalities, ModalityInfos
-from .modules import ModalitiesEncoder, ModalitiesDecoder
+
+def _zero_init_linear(linear: eqx.nn.Linear) -> eqx.nn.Linear:
+    """Zero-initialize an Equinox linear layer."""
+    linear = eqx.tree_at(
+        lambda m: m.weight,
+        linear,
+        jnp.zeros_like(linear.weight),
+    )
+    linear = eqx.tree_at(
+        lambda m: m.bias,
+        linear,
+        jnp.zeros_like(linear.bias),
+    )
+    return linear
 
 
 class AdaLayerNorm(eqx.Module):
+    """LayerNorm with optional external scale/shift modulation.
+
+    Inputs:
+        embed_dim (int): Feature dimension for normalized tokens.
+        eps (float): Numerical epsilon for layer normalization.
+
+    Outputs:
+        Array: Normalized token with optional condition-dependent scale/shift.
+    """
     ln: eqx.nn.LayerNorm
-    scale_proj: eqx.nn.Linear
-    shift_proj: eqx.nn.Linear
 
     def __init__(
         self, 
         embed_dim: int, 
         *, 
-        key: PRNGKeyArray, 
         eps: float = 1e-5
     ):
-        keys = jr.split(key)
-
         self.ln = eqx.nn.LayerNorm(
             shape=embed_dim, eps=eps, use_bias=False, use_weight=False
-        )
-
-        # Output shape (dim,) and zero init
-        self.scale_proj = eqx.nn.Linear(
-            embed_dim, embed_dim, key=keys[0], use_bias=True
-        )
-        self.shift_proj = eqx.nn.Linear(
-            embed_dim, embed_dim, key=keys[1], use_bias=True
-        )
-
-        # Zero init for scale and shift
-        self.scale_proj = eqx.tree_at(
-            lambda m: m.weight, 
-            self.scale_proj, 
-            jnp.zeros_like(self.scale_proj.weight)
-        )
-        self.scale_proj = eqx.tree_at(
-            lambda m: m.bias, 
-            self.scale_proj, 
-            jnp.zeros_like(self.scale_proj.bias)
-        )
-
-        self.shift_proj = eqx.tree_at(
-            lambda m: m.weight, 
-            self.shift_proj, 
-            jnp.zeros_like(self.shift_proj.weight)
-        )
-        self.shift_proj = eqx.tree_at(
-            lambda m: m.bias, 
-            self.shift_proj, 
-            jnp.zeros_like(self.shift_proj.bias)
         )
 
     def __call__(
         self, 
         x: Float[Array, "x"], 
-        c: Float[Array, "c"]
+        *,
+        scale: Optional[Float[Array, "x"]] = None,
+        shift: Optional[Float[Array, "x"]] = None,
     ) -> Float[Array, "x"]:
-        if c is None:
-            return self.ln(x) # NOTE: no shift/scale if there is no condition 
-        scale = self.scale_proj(c)
-        shift = self.shift_proj(c)
-        return self.ln(x) * (1. + scale) + shift
+        """Apply adaptive normalization.
+
+        Inputs:
+            x (Array): Input token embedding.
+            scale (Array | None): Optional feature-wise multiplicative modulation.
+            shift (Array | None): Optional feature-wise additive modulation.
+
+        Outputs:
+            Array: Adaptively normalized token.
+        """
+        x = self.ln(x)
+        if scale is None or shift is None:
+            return x
+        return x * (1. + scale) + shift
 
 
 class AttentionBlock(eqx.Module):
+    """Transformer residual block with adaLN-zero modulation.
+
+    Inputs:
+        input_shape (int): Token embedding size.
+        hidden_dim (int): MLP hidden size.
+        num_heads (int): Number of attention heads.
+        dropout_rate (float): Dropout probability.
+        key (PRNGKeyArray): Random key for parameter initialization.
+
+    Outputs:
+        Array: Updated token sequence with same shape as input.
+    """
     layer_norm1: AdaLayerNorm
     layer_norm2: AdaLayerNorm
     attention: eqx.nn.MultiheadAttention
     linear1: eqx.nn.Linear
     linear2: eqx.nn.Linear
+    modulation: eqx.nn.Linear
     dropout1: eqx.nn.Dropout
     dropout2: eqx.nn.Dropout
 
@@ -88,14 +96,17 @@ class AttentionBlock(eqx.Module):
         dropout_rate: float,
         key: PRNGKeyArray,
     ):
-        keys = jr.split(key, 5)
+        keys = jr.split(key, 6)
 
-        self.layer_norm1 = AdaLayerNorm(input_shape, key=keys[0])
-        self.layer_norm2 = AdaLayerNorm(input_shape, key=keys[1])
+        self.layer_norm1 = AdaLayerNorm(input_shape)
+        self.layer_norm2 = AdaLayerNorm(input_shape)
         self.attention = eqx.nn.MultiheadAttention(num_heads, input_shape, key=keys[2])
 
         self.linear1 = eqx.nn.Linear(input_shape, hidden_dim, key=keys[3])
         self.linear2 = eqx.nn.Linear(hidden_dim, input_shape, key=keys[4])
+        self.modulation = _zero_init_linear(
+            eqx.nn.Linear(input_shape, 6 * input_shape, key=keys[5])
+        )
         self.dropout1 = eqx.nn.Dropout(dropout_rate)
         self.dropout2 = eqx.nn.Dropout(dropout_rate)
 
@@ -106,11 +117,36 @@ class AttentionBlock(eqx.Module):
         mask: Optional[Bool[Array, "s s"]] = None,
         key: Optional[PRNGKeyArray] = None,
     ) -> Float[Array, "s e"]:
+        """Run one attention + MLP residual block.
 
-        input_x = jax.vmap(eqx.Partial(self.layer_norm1, c=c))(x)
-        x = x + self.attention(input_x, input_x, input_x, mask=mask)
+        Inputs:
+            x (Array): Token sequence with shape ``(S, E)``.
+            c (Array | None): Conditioning embedding.
+            mask (Array | None): Attention mask with shape ``(S, S)``.
+            key (PRNGKeyArray | None): Dropout key.
 
-        input_x = jax.vmap(eqx.Partial(self.layer_norm2, c=c))(x)
+        Outputs:
+            Array: Updated token sequence.
+        """
+        if c is None:
+            shift_msa = scale_msa = shift_mlp = scale_mlp = None
+            gate_msa = gate_mlp = 1.0
+        else:
+            modulation = self.modulation(jax.nn.silu(c))
+            shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = jnp.split(
+                modulation,
+                6,
+            )
+
+        input_x = jax.vmap(
+            lambda token: self.layer_norm1(token, scale=scale_msa, shift=shift_msa)
+        )(x)
+        input_x = self.attention(input_x, input_x, input_x, mask=mask)
+        x = x + gate_msa * input_x
+
+        input_x = jax.vmap(
+            lambda token: self.layer_norm2(token, scale=scale_mlp, shift=shift_mlp)
+        )(x)
         input_x = jax.vmap(self.linear1)(input_x)
         input_x = jax.nn.gelu(input_x)
 
@@ -123,12 +159,25 @@ class AttentionBlock(eqx.Module):
         input_x = jax.vmap(self.linear2)(input_x)
         input_x = self.dropout2(input_x, key=key2)
 
-        x = x + input_x
+        x = x + gate_mlp * input_x
 
         return x
 
 
 class VisionTransformer(eqx.Module):
+    """Stack of attention blocks for sequence processing.
+
+    Inputs:
+        embedding_dim (int): Token embedding size.
+        hidden_dim (int): MLP hidden size.
+        num_heads (int): Number of attention heads.
+        num_layers (int): Number of residual blocks.
+        dropout_rate (float): Dropout probability.
+        key (PRNGKeyArray): Random key for parameter initialization.
+
+    Outputs:
+        Array: Updated token sequence or class token depending on call mode.
+    """
     cls_token: Float[Array, "1 e"]
     attention_blocks: list[AttentionBlock]
     dropout: eqx.nn.Dropout
@@ -158,12 +207,28 @@ class VisionTransformer(eqx.Module):
     def __call__(
         self,
         x: Float[Array, "s e"],
-        c: Optional[Float[Array, "e"]],
+        # NOTE: Embed condition variables (e.g. C in G|C) here and sum them together
+        # this means that the correct PDF is being sampled, and C doesn't always have
+        # to be present in general. `c` here would be the embedded modality, so as to 
+        # resuse existing modules.
+        c: Optional[Float[Array, "e"]], 
         mask: Optional[Bool[Array, "s s"]] = None,
         *,
         key: Optional[PRNGKeyArray] = None,
         use_class_token: bool = False # May want to return class token for downstream regression
     ) -> Float[Array, "s e"] | Float[Array, "1 e"]:
+        """Run transformer forward pass on token sequence.
+
+        Inputs:
+            x (Array): Input token sequence.
+            c (Array | None): Conditioning embedding.
+            mask (Array | None): Attention mask.
+            key (PRNGKeyArray | None): Dropout/attention randomness key.
+            use_class_token (bool): If ``True``, prepend and return class token.
+
+        Outputs:
+            Array: Token sequence output or class token output.
+        """
 
         if use_class_token:
             x = jnp.concatenate([self.cls_token, x])
@@ -185,89 +250,3 @@ class VisionTransformer(eqx.Module):
             x = x[0] # Select the CLS token.
 
         return x
-
-
-class FlowTransformer(eqx.Module):
-    modalities_encoder: ModalitiesEncoder
-    modalities_decoder: ModalitiesDecoder
-
-    transformer: VisionTransformer
-
-    time_embedder: eqx.Module | Callable[[Scalar], Float[Array, "e"]]
-
-    modality_infos: ModalityInfos
-
-    def __init__(
-        self, 
-        modalities_encoder: ModalitiesEncoder, 
-        modalities_decoder: ModalitiesDecoder, 
-        transformer: VisionTransformer,
-        time_embedder: eqx.Module,
-        modality_infos: ModalityInfos
-    ):
-        self.modalities_encoder = modalities_encoder
-        self.modalities_decoder = modalities_decoder
-        self.transformer = transformer
-        self.time_embedder = time_embedder
-        self.modality_infos = modality_infos
-
-    def get_modality_lengths(self, keys: Optional[Sequence[str]] = None) -> list[int]:
-        if keys is None:
-            keys = sorted(self.modality_infos.keys())
-        return [self.modality_infos[k].sequence_length for k in keys]
-
-    def get_modalities_length(self, keys: Optional[Sequence[str]] = None) -> list[int]:
-        # list(accumulate(self.get_modality_lengths(keys=sorted(d.keys()))[:-1]))
-        lengths = self.get_modality_lengths(keys)[:-1] # Don't count last one
-        length = list(accumulate(lengths))
-        return length
-
-    def __call__(
-        self, 
-        d: Modalities, 
-        t: Optional[Scalar] = None, 
-        # condition: Optional[Float[Array, "..."]] = None, # Optional input: must be embedding dim?
-        masks: Optional[dict[str, Bool[Array, "..."]]] = None,
-        key: Optional[PRNGKeyArray] = None,
-        *,
-        use_class_token: bool = False
-    ) -> Modalities | Float[Array, "1 e"]:
-
-        keys = sorted(d.keys())
-
-        d = {k: d[k] for k in keys} # Normalize modality order once
-
-        if masks is not None:
-            masks = {k: masks[k] for k in keys}
-            token_mask = jnp.concatenate([jnp.ravel(masks[k]) for k in keys])
-            token_mask = jnp.astype(token_mask, jnp.bool_)
-            # Mask shape (query_seq_length, kv_seq_length).
-            mask = jnp.broadcast_to(
-                token_mask[jnp.newaxis, :],
-                (token_mask.shape[0], token_mask.shape[0]),
-            )
-        else:
-            mask = None
-
-        # Embed time as a condition into attention / MLP / LayerNorms
-        # not as a token!
-        if t is not None:
-            c = self.time_embedder(t)
-        else:
-            c = None
-
-        # Record input shapes for use in reconstructing the output
-        # modalities that are present or not
-        e = self.modalities_encoder(d)
-
-        # Stack modalities and input to transformer
-        e = jnp.concatenate(jax.tree.leaves(e))
-        h = self.transformer(e, c, mask=mask, key=key, use_class_token=use_class_token)
-        
-        lengths = self.get_modalities_length(keys) 
-        h = jax.tree.unflatten(jax.tree.structure(d), jnp.split(h, lengths))
-        # h = {k: x for k, x in zip(keys, h)} # Same order
-
-        v = self.modalities_decoder(h)
-
-        return v
