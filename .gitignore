@@ -1,5 +1,3 @@
-!assets/
-!assets/**
 .DS_Store
 __pycache__/
 out/
@@ -9,3 +7,7 @@ samples/
 *.swp
 weight_mask_test.py
 backups/
+
+# Keep repository assets even when their file types are ignored above.
+!assets/
+!assets/**
