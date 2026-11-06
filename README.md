@@ -85,11 +85,6 @@ parameter posteriors and predictive fields. Both support `flow_matching` and
 `config.sampling_config.flow_map_steps` before building the family to change the
 sampling cost.
 
-The root `inference.ipynb` is a legacy duplicate of the 2D notebook, with no
-unique analysis. It still has stale imports, an undefined checkpoint path and
-a syntax error, and is retained only as a historical artifact. It is not needed
-by the package or training scripts.
-
 Run the focused flow-map checks with:
 
 ```bash
