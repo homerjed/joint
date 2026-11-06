@@ -62,7 +62,7 @@ def get_timestep_embedding(
     emb = timesteps.astype(dtype) * emb
     emb = jnp.concatenate([jnp.sin(emb), jnp.cos(emb)], axis=0)
     if embedding_dim % 2 == 1:
-        emb = jax.lax.pad(emb, dtype(0), ((0, 0, 0), (0, 1, 0)))
+        emb = jnp.pad(emb, (0, 1))
     assert emb.shape == (embedding_dim,)
     return emb
 

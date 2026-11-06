@@ -70,7 +70,6 @@ def build_family(config, modality_infos, key):
             list(modalities_to_sample),
             solution_kwargs=solution_kwargs,
             key=sample_key,
-            bridge_path=path,
         )
 
     return GenerativeFamily(

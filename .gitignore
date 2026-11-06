@@ -7,6 +7,7 @@ samples/
 *.swp
 weight_mask_test.py
 backups/
+tests/
 
 # Keep repository assets even when their file types are ignored above.
 !assets/

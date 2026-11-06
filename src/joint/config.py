@@ -17,6 +17,10 @@ MODEL_BACKBONE_DEFAULTS = {
 
 
 MODEL_FAMILY_DEFAULTS = {
+    "flow_map": {
+        "n_blocks": 4,
+        "t_emb_dim": 32,
+    },
     "flow_matching": {
         "n_blocks": 4,
         "t_emb_dim": 32,
@@ -334,6 +338,10 @@ def get_config(
             "time_sampling_stratified": True,
             "n_t_bins": 4,
             "conditional_training_probability": 1.0,
+            "flow_map_loss": "lsd",
+            "flow_map_diagonal_weight": 1.0,
+            "flow_map_distillation_weight": 1.0,
+            "flow_map_psd_split": "uniform",
             "reconstruction_loss": "l1+l2",
             "reconstruction_perceptual_weight": 0.0,
             "pixel_consistency_weight": 0.25,
@@ -351,6 +359,7 @@ def get_config(
             "solver_factory": dfx.Heun,
             "path_factory": OptimalTransportPath,
             "forward_steps": 1,
+            "flow_map_steps": 4,
             "use_sampling_scheduler": False,
             "cache_sampling_noise": False,
         },

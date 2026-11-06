@@ -99,6 +99,7 @@ def compute_flow_matching_loss(
     n_t_bins: int,
     conditioning_mask: Optional[Bool[Array, "m"]] = None,
 ) -> tuple[Scalar, dict[str, Scalar], Float[Array, "b"], Float[Array, "b"]]:
+    """Match generated velocities while keeping conditioning inputs clean."""
     modality_names = tuple(sorted(batch.keys()))
     attention_mask = None
     generated_weights = None
@@ -121,6 +122,11 @@ def compute_flow_matching_loss(
             clean_modalities,
             noise_modalities,
         )
+        if conditioning_mask is not None:
+            path_state = {
+                name: jnp.where(conditioning_mask[i], clean_modalities[name], path_state[name])
+                for i, name in enumerate(modality_names)
+            }
 
         predictions = model(path_state, t_value, key=model_key, attention_mask=attention_mask)
         per_modality = jax.tree.map(_mse, predictions, targets)

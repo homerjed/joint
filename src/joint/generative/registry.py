@@ -1,9 +1,11 @@
 from .flow_matching import build_family as build_flow_matching_family
+from .flow_map import build_family as build_flow_map_family
 from .sphere_encoder import build_family as build_sphere_encoder_family
 
 
 FAMILY_BUILDERS = {
     "flow_matching": build_flow_matching_family,
+    "flow_map": build_flow_map_family,
     "sphere_encoder": build_sphere_encoder_family,
 }
 

@@ -4,7 +4,6 @@ import diffrax as dfx
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-import jax.random as jr
 from jaxtyping import Float, PRNGKeyArray
 
 from .model import FlowMatchingModel
@@ -21,6 +20,7 @@ def single_sample_fn_ode(
     times: Optional[Float[jax.Array, "T"]] = None,
     key: Optional[PRNGKeyArray] = None,
 ) -> dict[str, Float[jax.Array, "..."]]:
+    """Return final states, or a leading saved-time axis when ``times`` is given."""
     del key
 
     def velocity(t, x, args):
@@ -41,7 +41,7 @@ def single_sample_fn_ode(
         saveat=saveat,
     )
     x_1 = sol.ys
-    return jax.tree.map(lambda x: jnp.squeeze(x, axis=0), x_1)
+    return x_1 if times is not None else jax.tree.map(lambda x: x[0], x_1)
 
 
 @eqx.filter_jit
@@ -55,14 +55,16 @@ def single_sample_modalities_fn_ode(
     key: Optional[PRNGKeyArray] = None,
     bridge_path: Optional[OptimalTransportPath] = None,
 ) -> dict[str, Float[jax.Array, "..."]]:
+    """Sample generated modalities with clean observations fixed at every step.
+
+    Explicit ``times`` retains the saved-time axis. ``key`` and ``bridge_path``
+    are accepted for compatibility but unused; conditioning is never noised.
+    """
+    del key, bridge_path
     if modalities_to_sample is not None:
         modalities_to_sample = frozenset(modalities_to_sample)
 
-    if bridge_path is None:
-        bridge_path = OptimalTransportPath()
-
     fixed_names = ()
-    conditioning_noise = {}
     attention_mask = None
     if modalities_to_sample is not None:
         fixed_names = tuple(
@@ -79,18 +81,6 @@ def single_sample_modalities_fn_ode(
             keys=keys,
         )
 
-        if key is not None and len(fixed_names) > 0:
-            noise_keys = jr.split(key, len(fixed_names))
-            conditioning_noise = {
-                name: jr.normal(noise_key, x_0[name].shape, dtype=x_0[name].dtype)
-                for name, noise_key in zip(fixed_names, noise_keys)
-            }
-        else:
-            conditioning_noise = {
-                name: jnp.zeros_like(x_0[name])
-                for name in fixed_names
-            }
-
     def velocity(t, x, args):
         (model_instance,) = args
 
@@ -99,7 +89,7 @@ def single_sample_modalities_fn_ode(
                 name: (
                     x[name]
                     if name in modalities_to_sample
-                    else bridge_path.psi_t(t, x_0[name], conditioning_noise[name])
+                    else x_0[name]
                 )
                 for name in x.keys()
             }
@@ -134,4 +124,4 @@ def single_sample_modalities_fn_ode(
         saveat=saveat,
     )
     x_1 = sol.ys
-    return jax.tree.map(lambda x: jnp.squeeze(x, axis=0), x_1)
+    return x_1 if times is not None else jax.tree.map(lambda x: x[0], x_1)

@@ -15,7 +15,10 @@ ConditionalSampleFn = Callable[[eqx.Module, Modalities, Sequence[str], PRNGKeyAr
 
 @dataclass(frozen=True)
 class GenerativeFamily:
-    """Container for a generative model and its family-specific entry points."""
+    """
+        Container for a generative model and its family-specific entry points
+        for sampling and training loss.
+    """
 
     name: str
     model: eqx.Module

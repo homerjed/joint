@@ -16,7 +16,7 @@ from .utils import apply_ema, tree_random_normal_like, make_layernorm_decay_mask
 def save_training_state(
     checkpoint_path: Union[str, Path],
     model: eqx.Module,
-    ema_model: eqx.Module,
+    ema_model: Optional[eqx.Module],
     optimiser: optax.GradientTransformation,
     optimiser_state: optax.OptState,
     train_step: int,
@@ -34,7 +34,6 @@ def save_training_state(
     Outputs:
         None: Writes a serialized checkpoint file.
     """
-    # NOTE: check handling in case use_ema=False meaning that ema_model=None
     state = {
         "model": model,
         "ema_model": ema_model,
@@ -51,9 +50,11 @@ def load_training_state(
     optimiser: optax.GradientTransformation,
     optimiser_state: optax.OptState,
     train_step: int = 0,
+    *,
+    use_ema: bool = True,
 ) -> tuple[
     eqx.Module, 
-    eqx.Module, 
+    Optional[eqx.Module],
     optax.GradientTransformation, 
     optax.OptState, 
     int
@@ -66,13 +67,14 @@ def load_training_state(
         optimiser (optax.GradientTransformation): Template optimizer object.
         optimiser_state (optax.OptState): Template optimizer state.
         train_step (int): Fallback step value when building template state.
+        use_ema (bool): Whether EMA was enabled when the checkpoint was saved.
 
     Outputs:
         tuple: ``(model, ema_model, optimiser, optimiser_state, train_step)``.
     """
     template = {
         "model": model,
-        "ema_model": model, # Same model structure
+        "ema_model": model if use_ema else None,
         "optimiser": optimiser,
         "optimiser_state": optimiser_state,
         "train_step": jnp.asarray(train_step, dtype=jnp.int32),
@@ -130,7 +132,8 @@ def get_optimiser(
             )
         warmup_steps = int(getattr(train_config, "warmup_steps", 1_000))
         warmup_steps = min(max(0, warmup_steps), max(0, int(train_config.n_steps) - 1))
-        decay_steps = max(1, int(train_config.n_steps) - warmup_steps)
+        # Optax's total schedule length already includes the warmup.
+        decay_steps = max(1, int(train_config.n_steps))
         lr_end_value = float(
             getattr(train_config, "lr_end_value", float(learning_rate) * 0.1)
         )
@@ -207,12 +210,12 @@ def loss_fn(
         t (Array): Per-example diffusion/flow times.
         keys (PRNGKeyArray): Per-example model random keys.
         conditioning_mask (Array | None): Optional batch-level modality mask where
-            ``True`` marks fixed conditioning modalities.
+            ``True`` marks conditioning modalities kept clean at every time.
 
     Outputs:
         tuple: ``(loss, per_modality_loss, t_bin_loss, t_bin_count)``.
     """
-    # Diffuse modalities in d according to same diffusion path
+    # Interpolate generated modalities; conditioning inputs stay clean.
     modality_names = tuple(sorted(d.keys()))
     attention_mask = None
     generated_weights = None
@@ -227,6 +230,11 @@ def loss_fn(
     def _single_loss_fn(t, d, z, key):
         u = jax.tree.map(lambda x, z: path.d_psi_t_dt(t, x, z), d, z)
         psi = jax.tree.map(lambda x, z: path.psi_t(t, x, z), d, z)
+        if conditioning_mask is not None:
+            psi = {
+                name: jnp.where(conditioning_mask[i], d[name], psi[name])
+                for i, name in enumerate(modality_names)
+            }
 
         u_ = model(psi, t, key=key, attention_mask=attention_mask)
 

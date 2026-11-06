@@ -54,7 +54,21 @@ def get_args():
         default=None,
         help="Override `config.model_config.model_family` for this run and persist it to `out/<run_name>/config.json`.",
     )
+    parser.add_argument(
+        "--flow_map_loss", choices=("lsd", "esd", "psd"), default=None,
+        help="Self-distillation loss for the flow_map family (default: lsd).",
+    )
+    parser.add_argument(
+        "--flow_map_steps", type=int, default=None,
+        help="Number of learned-map sampling steps (default: 4; use 1 for one-step).",
+    )
+    parser.add_argument(
+        "--flow_map_psd_split", choices=("uniform", "midpoint"), default=None,
+        help="Intermediate-time distribution for PSD.",
+    )
     args = parser.parse_args()
+    if args.flow_map_steps is not None and args.flow_map_steps < 1:
+        parser.error("--flow_map_steps must be positive.")
     return args
 
 
@@ -124,6 +138,19 @@ if __name__ == "__main__":
         if previous_model_family != requested_model_family:
             config = set_model_family(config, requested_model_family)
             save_json_config(config_path, config)
+    flow_map_overrides = (
+        args.flow_map_loss, args.flow_map_steps, args.flow_map_psd_split
+    )
+    if any(value is not None for value in flow_map_overrides):
+        if config.model_config.model_family != "flow_map":
+            raise ValueError("Flow-map options require --model_family flow_map.")
+        if args.flow_map_loss is not None:
+            config.train_config.flow_map_loss = args.flow_map_loss
+        if args.flow_map_steps is not None:
+            config.sampling_config.flow_map_steps = args.flow_map_steps
+        if args.flow_map_psd_split is not None:
+            config.train_config.flow_map_psd_split = args.flow_map_psd_split
+        save_json_config(config_path, config)
     backbone_config = config.model_config.backbone
 
     key = jr.key(config.seed)
@@ -290,6 +317,7 @@ if __name__ == "__main__":
     if args.reload and train_state_path.exists():
         v, v_ema, opt, opt_state, start_step = load_training_state(
             train_state_path,
+            use_ema=use_ema,
             model=v,
             optimiser=opt,
             optimiser_state=opt_state,

@@ -47,6 +47,20 @@ def single_sample_modalities_fn(
     )
     latents = model.spherify(latents)
 
+    if fixed_names:
+        key_loop, key_encode = jr.split(key_loop)
+        conditioning_inputs = {
+            name: (x_0[name] if name in fixed_names else jnp.zeros_like(x_0[name]))
+            for name in ordered_keys
+        }
+        conditioning_latents = model.spherify(
+            model.encode(conditioning_inputs, attention_mask=attention_mask, key=key_encode)
+        )
+        token_owners = model.tokenizer.get_modality_token_owners(keys=ordered_keys)
+        fixed_tokens = conditioning_mask[token_owners, None]
+        # Observations must reach the decoder before the first generated sample.
+        latents = jnp.where(fixed_tokens, conditioning_latents, latents)
+
     shared_noise = None
     if cache_sampling_noise:
         key_loop, key_shared = jr.split(key_loop)
