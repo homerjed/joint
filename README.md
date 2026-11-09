@@ -10,7 +10,7 @@ The code is designed to be modular for building models with UNet and Transformer
     <em>A diagram of a multi-modal flow matching model that was built with this code, mapping multi-modal output from a cosmological N-body simulation.</em>
 </p>
 
-## Examples
+<!-- ## Examples
 
 The default `uv sync` installs joint without the example dependencies. To install
 the GalSBI examples, use Python 3.13 and run from the repository root:
@@ -43,7 +43,7 @@ The default example uses GalSBI's image renderer. Pass `--source-extraction`
 to the dataset script to also produce measured catalogues; this requires a separate
 [SExtractor installation](https://sextractor.readthedocs.io/en/latest/Installing.html).
 GalSBI downloads supporting data and may compile PyCosmo on its first run; see the
-[GalSBI setup notes](https://cosmo-docs.phys.ethz.ch/galsbi/faq.html).
+[GalSBI setup notes](https://cosmo-docs.phys.ethz.ch/galsbi/faq.html). -->
 
 ## Citations
 
