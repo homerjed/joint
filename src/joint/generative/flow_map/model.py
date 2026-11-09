@@ -62,8 +62,13 @@ class FlowMapModel(eqx.Module):
         attention_mask=None,
         key: Optional[PRNGKeyArray] = None,
     ) -> Modalities:
-        """Transport from s to t in one network call; X(s,s,x) is exactly x."""
+        """Transport in one call; X(s,s,x) is x on valid entries, with padding zero."""
+        if masks is not None:
+            modalities = self.backbone.tokenizer.mask_modalities(modalities, masks)
         velocity = self(
             modalities, s, t, masks=masks, attention_mask=attention_mask, key=key
         )
-        return jax.tree.map(lambda x, v: x + (t - s) * v, modalities, velocity)
+        result = jax.tree.map(lambda x, v: x + (t - s) * v, modalities, velocity)
+        if masks is not None:
+            result = self.backbone.tokenizer.mask_modalities(result, masks)
+        return result

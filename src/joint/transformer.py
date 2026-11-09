@@ -141,7 +141,15 @@ class AttentionBlock(eqx.Module):
         input_x = jax.vmap(
             lambda token: self.layer_norm1(token, scale=scale_msa, shift=shift_msa)
         )(x)
-        input_x = self.attention(input_x, input_x, input_x, mask=mask)
+        # Equinox's finite masked logits give uniform weights when a row has no
+        # allowed keys. Evaluate such rows on a safe diagonal, then clear the update.
+        attention_mask = mask
+        if mask is not None:
+            has_keys = jnp.any(mask, axis=-1)
+            attention_mask = mask | (~has_keys[:, None] & jnp.eye(x.shape[0], dtype=jnp.bool_))
+        input_x = self.attention(input_x, input_x, input_x, mask=attention_mask)
+        if mask is not None:
+            input_x = jnp.where(has_keys[:, None], input_x, 0)
         x = x + gate_msa * input_x
 
         input_x = jax.vmap(
@@ -215,7 +223,8 @@ class VisionTransformer(eqx.Module):
         mask: Optional[Bool[Array, "s s"]] = None,
         *,
         key: Optional[PRNGKeyArray] = None,
-        use_class_token: bool = False # May want to return class token for downstream regression
+        use_class_token: bool = False,
+        token_mask: Optional[Bool[Array, "s"]] = None,
     ) -> Float[Array, "s e"] | Float[Array, "1 e"]:
         """Run transformer forward pass on token sequence.
 
@@ -225,15 +234,33 @@ class VisionTransformer(eqx.Module):
             mask (Array | None): Attention mask.
             key (PRNGKeyArray | None): Dropout/attention randomness key.
             use_class_token (bool): If ``True``, prepend and return class token.
+            token_mask (Array | None): Valid token rows; invalid rows remain zero.
 
         Outputs:
             Array: Token sequence output or class token output.
         """
 
+        if token_mask is not None:
+            token_mask = jnp.asarray(token_mask, dtype=jnp.bool_)
+            if token_mask.shape != (x.shape[0],):
+                raise ValueError("token_mask must have one flag per token.")
+            x = jnp.where(token_mask[:, None], x, 0)
+            valid_keys = jnp.broadcast_to(token_mask[None, :], (x.shape[0], x.shape[0]))
+            mask = valid_keys if mask is None else mask & valid_keys
+
         if use_class_token:
             x = jnp.concatenate([self.cls_token, x])
             if mask is not None:
-                mask = jnp.pad(mask, ((1, 0), (1, 0)), constant_values=True)
+                pool_keys = jnp.any(mask, axis=0)
+                # A query may read CLS only if it can read every token pooled by
+                # CLS; otherwise pooling would bypass directional attention.
+                read_class = jnp.all(~pool_keys[None, :] | mask, axis=1)
+                mask = jnp.pad(mask, ((1, 0), (1, 0)), constant_values=False)
+                mask = mask.at[0, 0].set(True)
+                mask = mask.at[0, 1:].set(pool_keys)
+                mask = mask.at[1:, 0].set(read_class)
+            if token_mask is not None:
+                token_mask = jnp.concatenate([jnp.ones((1,), dtype=jnp.bool_), token_mask])
 
         if key is not None:
             dropout_key, *attention_keys = jr.split(key, len(self.attention_blocks) + 1)
@@ -245,6 +272,8 @@ class VisionTransformer(eqx.Module):
 
         for block, attention_key in zip(self.attention_blocks, attention_keys):
             x = block(x, c=c, mask=mask, key=attention_key)
+            if token_mask is not None:
+                x = jnp.where(token_mask[:, None], x, 0)
 
         if use_class_token:
             x = x[0] # Select the CLS token.

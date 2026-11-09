@@ -10,6 +10,41 @@ The code is designed to be modular for building models with UNet and Transformer
     <em>A diagram of a multi-modal flow matching model that was built with this code, mapping multi-modal output from a cosmological N-body simulation.</em>
 </p>
 
+## Examples
+
+The default `uv sync` installs joint without the example dependencies. To install
+the GalSBI examples, use Python 3.13 and run from the repository root:
+
+```bash
+uv sync --group examples
+uv run --group examples python scripts/galsbi_dataset.py --n-samples 100 --n-pix 64
+```
+
+The [GalSBI script](scripts/galsbi_dataset.py) generates small sky patches with
+paired `grizy` images, galaxy catalogues and population parameters, then saves a
+NumPy dataset with catalogue padding masks and simulation metadata. Outputs go
+to `out/galsbi/` relative to the working directory. Use `--n-samples` and
+`--n-pix` to choose the dataset size and image resolution.
+
+The [flow-map training script](scripts/galsbi_flow_map.py) loads that dataset
+and jointly generates images, galaxy catalogues and population parameters. It
+uses a shared per-galaxy MLP, masked multimodal attention, a fitted galaxy-count
+distribution, and selectable PSD/ESD/LSD losses with one- or few-step sampling.
+
+```bash
+uv run --group examples python scripts/galsbi_flow_map.py --steps 1000 --loss psd
+```
+
+Training selects the latest archive under `out/galsbi/`; pass `--data path/to/data.npz`
+to use a specific archive. Checkpoints, generated arrays and diagnostic plots are
+saved under `out/galsbi_flow_map/`. Both scripts accept `--output-dir` and `--help`.
+
+The default example uses GalSBI's image renderer. Pass `--source-extraction`
+to the dataset script to also produce measured catalogues; this requires a separate
+[SExtractor installation](https://sextractor.readthedocs.io/en/latest/Installing.html).
+GalSBI downloads supporting data and may compile PyCosmo on its first run; see the
+[GalSBI setup notes](https://cosmo-docs.phys.ethz.ch/galsbi/faq.html).
+
 ## Citations
 
 ```bibtex

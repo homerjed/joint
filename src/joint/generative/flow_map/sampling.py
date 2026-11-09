@@ -39,6 +39,7 @@ def single_sample_modalities_fn(
     t0: float = 0.0,
     t1: float = 1.0,
     times=None,
+    masks=None,
     key: Optional[PRNGKeyArray] = None,
 ) -> Modalities:
     """Compose learned maps, using exactly one model call per grid interval.
@@ -48,6 +49,7 @@ def single_sample_modalities_fn(
     matching conditional flow-map training. ``times`` overrides the uniform
     grid and includes both endpoints; only the final state is returned.
     Dropout is disabled, so ``key`` is accepted for the family API but unused.
+    Unbatched token-validity ``masks`` keep padded entries zero at every step.
     """
     del key
     names = tuple(sorted(x_0))
@@ -58,6 +60,10 @@ def single_sample_modalities_fn(
     if unknown:
         raise ValueError(f"Unknown modalities to sample: {sorted(unknown)}")
     grid = _time_grid(n_steps, t0, t1, times)
+    if masks is not None:
+        if set(masks).difference(names):
+            raise ValueError("Mask keys must name modalities in x_0.")
+        x_0 = model.backbone.tokenizer.mask_modalities(x_0, masks)
     if not generated:
         return x_0
 
@@ -70,11 +76,14 @@ def single_sample_modalities_fn(
 
     def step(state, interval):
         s, t = interval
-        mapped = model.flow_map(state, s, t, attention_mask=attention_mask)
+        mask_kwargs = {} if masks is None else {"masks": masks}
+        mapped = model.flow_map(state, s, t, attention_mask=attention_mask, **mask_kwargs)
         state = {
             name: mapped[name] if name in generated else x_0[name]
             for name in names
         }
+        if masks is not None:
+            state = model.backbone.tokenizer.mask_modalities(state, masks)
         return state, None
 
     result, _ = jax.lax.scan(step, x_0, (grid[:-1], grid[1:]))
@@ -89,9 +98,10 @@ def single_sample_fn(
     t0: float = 0.0,
     t1: float = 1.0,
     times=None,
+    masks=None,
     key: Optional[PRNGKeyArray] = None,
 ) -> Modalities:
     """Generate all modalities by composing one or a few learned maps."""
     return single_sample_modalities_fn(
-        model, x_0, n_steps=n_steps, t0=t0, t1=t1, times=times, key=key
+        model, x_0, n_steps=n_steps, t0=t0, t1=t1, times=times, masks=masks, key=key
     )

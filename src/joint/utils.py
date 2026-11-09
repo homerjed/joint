@@ -295,7 +295,7 @@ class ModalitySpec:
 
     Inputs:
         name (str): Modality name.
-        modality_type (Literal): One of ``image``, ``vector``, or ``graph``.
+        modality_type (Literal): One of ``image``, ``vector``, ``set``, or ``graph``.
         input_shape (tuple[int, ...]): Raw modality shape.
         patch_size (int | None): Patch size for image modalities.
         sequence_length (int | None): Token count for the modality.
@@ -305,7 +305,7 @@ class ModalitySpec:
         ModalitySpec: Validated immutable-like metadata record.
     """
     name: str
-    modality_type: Literal["image", "vector", "graph"]
+    modality_type: Literal["image", "vector", "set", "graph"]
 
     # Raw input space
     input_shape: Tuple[int, ...]
@@ -333,6 +333,8 @@ class ModalitySpec:
             self._validate_image()
         elif self.modality_type == "vector":
             self._validate_vector()
+        elif self.modality_type == "set":
+            self._validate_set()
         elif self.modality_type == "graph":
             self._validate_graph()
         else:
@@ -423,8 +425,19 @@ class ModalitySpec:
             self.sequence_length = 1
 
     # ======================================================
-    # Graph modality checks
+    # Set and graph modality checks
     # ======================================================
+
+    def _validate_set(self):
+        """Use one token per row of a padded ``(max_items, features)`` set."""
+        if len(self.input_shape) != 2:
+            raise ValueError("Set modality requires input_shape = (max_items, features).")
+        if self.patch_size is not None:
+            raise ValueError("Set modality should not define patch_size.")
+        n_items = self.input_shape[0]
+        if self.sequence_length is not None and self.sequence_length != n_items:
+            raise ValueError("Set sequence_length must equal max_items.")
+        self.sequence_length = n_items
 
     def _validate_graph(self):
         """Validate graph modality configuration.

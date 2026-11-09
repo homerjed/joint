@@ -45,15 +45,15 @@ def build_family(config, modality_infos, key):
         sampling_config.path_factory(), train_config=config.train_config, t0=t0, t1=t1
     )
 
-    def sample_fn(model_instance, x_0, sample_key):
+    def sample_fn(model_instance, x_0, sample_key, *, masks=None):
         return single_sample_fn(
-            model_instance, x_0, n_steps=n_steps, t0=t0, t1=t1, key=sample_key
+            model_instance, x_0, n_steps=n_steps, t0=t0, t1=t1, masks=masks, key=sample_key
         )
 
-    def sample_modalities_fn(model_instance, x_0, modalities_to_sample, sample_key):
+    def sample_modalities_fn(model_instance, x_0, modalities_to_sample, sample_key, *, masks=None):
         return single_sample_modalities_fn(
             model_instance, x_0, modalities_to_sample,
-            n_steps=n_steps, t0=t0, t1=t1, key=sample_key,
+            n_steps=n_steps, t0=t0, t1=t1, masks=masks, key=sample_key,
         )
 
     return GenerativeFamily(

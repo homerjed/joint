@@ -146,6 +146,38 @@ class ParameterEmbedding(eqx.Module):
         return self.linear(p) + self.modality_embedding
 
 
+class SetEmbedding(eqx.Module):
+    """Embed each set row with the same MLP, without row-position embeddings."""
+
+    mlp: eqx.nn.MLP
+    modality_embedding: Float[Array, "e"]
+
+    def __init__(self, input_dim: int, embedding_dim: int, key: PRNGKeyArray):
+        key_mlp, key_embedding = jr.split(key)
+        self.mlp = eqx.nn.MLP(
+            input_dim, embedding_dim, embedding_dim, depth=1,
+            activation=jax.nn.gelu, key=key_mlp,
+        )
+        self.modality_embedding = jr.normal(key_embedding, (embedding_dim,)) * 0.02
+
+    def __call__(self, x: Float[Array, "n f"]) -> Float[Array, "n e"]:
+        return jax.vmap(self.mlp)(x) + self.modality_embedding
+
+
+class SetDecoder(eqx.Module):
+    """Decode each set token independently with shared parameters."""
+
+    norm: eqx.nn.LayerNorm
+    linear: eqx.nn.Linear
+
+    def __init__(self, embedding_dim: int, output_dim: int, key: PRNGKeyArray):
+        self.norm = eqx.nn.LayerNorm(embedding_dim)
+        self.linear = eqx.nn.Linear(embedding_dim, output_dim, key=key)
+
+    def __call__(self, x: Float[Array, "n e"]) -> Float[Array, "n f"]:
+        return jax.vmap(lambda row: self.linear(self.norm(row)))(x)
+
+
 class ParameterDecoder(eqx.Module):
     """Decode a single parameter token back to vector space.
 
@@ -241,9 +273,13 @@ def _get_modality_encoder_module(name, modality_infos, key):
             num_patches=modality.sequence_length,
             key=key
         )
-    if modality.modality_type == "vector":
+    elif modality.modality_type == "vector":
         dim = prod(modality.input_shape)
         module = ParameterEmbedding(dim, modality.embedding_dim, key=key)
+    elif modality.modality_type == "set":
+        module = SetEmbedding(modality.input_shape[1], modality.embedding_dim, key=key)
+    else:
+        raise ValueError(f"Unsupported modality type: {modality.modality_type}")
     return module
     
 
@@ -361,9 +397,13 @@ def _get_modality_decoder_module(name, modality_infos, key):
             patch_size=modality.patch_size, 
             key=key
         )
-    if modality.modality_type == "vector":
+    elif modality.modality_type == "vector":
         dim = prod(modality.input_shape)
         module = ParameterDecoder(modality.embedding_dim, dim, key=key)
+    elif modality.modality_type == "set":
+        module = SetDecoder(modality.embedding_dim, modality.input_shape[1], key=key)
+    else:
+        raise ValueError(f"Unsupported modality type: {modality.modality_type}")
     return module
 
 

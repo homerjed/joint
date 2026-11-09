@@ -1,7 +1,7 @@
 [project]
 name = "joint"
 version = "0.1.0"
-description = "Add your description here"
+description = "Simple multi-modal generative models in JAX"
 readme = "README.md"
 authors = [
     { name = "homerjed", email = "jedhmr@gmail.com" }
@@ -19,6 +19,17 @@ dependencies = [
     "optax>=0.2.7",
     "tqdm>=4.67.3",
 ]
+
+[dependency-groups]
+examples = [
+    "galsbi>=0.3.0,<0.4",
+    "jupyterlab>=4.4,<5",
+    # Retain wheels for macOS 12; newer PyTorch releases require macOS 14.
+    "torch<2.9; sys_platform == 'darwin'",
+]
+
+[tool.uv.dependency-groups]
+examples = {requires-python = ">=3.13,<3.14"}
 
 [build-system]
 requires = ["uv_build>=0.9.9,<0.10.0"]
